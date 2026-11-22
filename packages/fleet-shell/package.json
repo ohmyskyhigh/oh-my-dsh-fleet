@@ -1,0 +1,62 @@
+{
+  "name": "@dsh-fleet/shell",
+  "version": "0.9.8",
+  "description": "oh-my-dsh-fleet: durable multi-agent tasks with native DSH Sessions, human controls and Workspace Dashboards.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "dsh": "0.2.2-rc.5"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./runtime": "./runtime.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "runtime.js",
+    "src/fleet-core.js",
+    "src/fleet-model.js",
+    "src/fleet-store.js",
+    "src/fleet-service.js",
+    "src/fleet-dsh-adapter.js",
+    "src/fleet-chat.js",
+    "src/fleet-dashboard-api.js",
+    "src/fleet-runtime-lifecycle.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "THIRD-PARTY-NOTICES.txt",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remote-access",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-shortcuts",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "license": "MIT"
+}

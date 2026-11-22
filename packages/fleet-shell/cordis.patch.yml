@@ -1,0 +1,6 @@
+# Add Fleet panels without replacing the native Workspace / Chat provider.
+- insert:
+    - id: dsh-fleet-shell
+      name: './index.js'
+    - id: dsh-fleet-runtime
+      name: './runtime.js'

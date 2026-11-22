@@ -1,0 +1,15 @@
+* text=auto
+*.md text eol=lf
+*.json text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.svg text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Preserve exact bytes for deterministic client builds.
+packages/fleet-shell/client.js -text -whitespace
+packages/fleet-shell/src/fleet-client.js -text -whitespace

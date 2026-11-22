@@ -1,0 +1,16 @@
+# Fleet and local DSH state
+.fleet/
+.dsh_fleet/
+.dsh/
+
+# Dependencies and generated local output
+node_modules/
+.artifacts/
+coverage/
+*.tgz
+*.log
+
+# Local credentials and configuration
+.env
+.env.*
+!.env.example

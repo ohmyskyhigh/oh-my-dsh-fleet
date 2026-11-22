@@ -1,0 +1,23 @@
+{
+  "name": "oh-my-dsh-fleet",
+  "version": "0.9.8",
+  "private": true,
+  "type": "module",
+  "description": "oh-my-dsh-fleet development and integration checks",
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "test": "node --test scripts/test-fleet-agent-start.mjs scripts/test-fleet-chat.mjs scripts/test-fleet-clarity.mjs scripts/test-fleet-client.mjs scripts/test-fleet-compat-load.mjs scripts/test-fleet-core.mjs scripts/test-fleet-dashboard-api.mjs scripts/test-fleet-dashboard-redesign.mjs scripts/test-fleet-draft-client.mjs scripts/test-fleet-drafts.mjs scripts/test-fleet-dsh-adapter.mjs scripts/test-fleet-evidence.mjs scripts/test-fleet-flow-drag.mjs scripts/test-fleet-gate-dispatch.mjs scripts/test-fleet-host.mjs scripts/test-fleet-incompatible-ui.mjs scripts/test-fleet-locale.mjs scripts/test-fleet-naming-title.mjs scripts/test-fleet-recreation-session.mjs scripts/test-fleet-runtime.mjs scripts/test-fleet-schedule-merge.mjs scripts/test-fleet-schedule.mjs scripts/test-fleet-service.mjs scripts/test-fleet-stage-plan.mjs scripts/test-fleet-store.mjs scripts/test-fleet-template-instantiate.mjs scripts/test-fleet-ticket-readability.mjs",
+    "test:browser": "node --test scripts/test-fleet-workspace-nav.mjs",
+    "fleet:unlock": "node scripts/fleet-unlock.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.15.0"
+  }
+}
