@@ -8,11 +8,46 @@
 
 `oh-my-dsh-fleet` 是 DeepSeek Harness（DSH）的多 Agent 工作流编排插件。它把对话里的需求整理成一张 Ticket，按其中的 SOP（标准作业流程）执行。启动前确认计划，执行中从节点打开 DSH 原生对话看进度。跑顺的流程可以存成模板，下次接着用。
 
+![Fleet 分享图，展示并行执行、Agent 与人工审核、退回返工及最终交付](.github/assets/social-preview.png)
+
+**兼容版本**　Fleet `0.9.8` · DeepSeek Harness `0.2.2-rc.5` · [下载安装包](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.9.8/dsh-fleet-shell-0.9.8.tgz)
+
 ![Fleet Ticket 展示两个已完成的 Agent 节点、待处理的人工审核关卡和第 1 版发布指南](.github/assets/fleet-ticket-flow.png)
 
 *这是一次发布 SOP 的执行现场。两位 Agent 已分别完成指南撰写和安装示例验证。你审核 `release-guide.md` 后，最终交付步骤才会继续。*
 
-[Workspace 运营](#一个-workspace-一套运营体系) · [Ticket 执行](#一张-ticket-从需求推进到交付) · [Agent 分工与观察](#按阶段分工按节点查看) · [OA 审核](#在关键交接处设置-oa-审核) · [快速上手](#快速上手) · [构建与安装](#构建与安装)
+[Workspace 运营](#一个-workspace-一套运营体系) · [Ticket 执行](#一张-ticket-从需求推进到交付) · [Agent 分工与观察](#按阶段分工按节点查看) · [OA 审核](#在关键交接处设置-oa-审核) · [快速上手](#快速上手) · [安装与兼容性](#安装与兼容性)
+
+## 安装与兼容性
+
+Fleet **`0.9.8`** 的插件包名为 `@dsh-fleet/shell`，清单要求 **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.2.2-rc.5`**。有 CLI 时可运行 `dsh --version` 核对宿主版本。
+
+### DeepSeek Harness 桌面端
+
+1. 从 [v0.9.8 Release](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8) 下载 [`dsh-fleet-shell-0.9.8.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.9.8/dsh-fleet-shell-0.9.8.tgz)，保留压缩包。
+2. 在 DSH 打开「插件 → 添加插件」，输入下载包的本机绝对路径。安装后启用 `oh-my-dsh-fleet`，如果界面提示重启，按提示重启。
+3. 在 Fleet 侧栏为目标工作区启用 Fleet。进入该工作区的原生对话，发送 `/fleet help` 验证入口可用。
+
+### CLI 管理的 DSH Profile
+
+把 `web` 换成你实际使用的 Profile 名，把路径换成安装包的本机绝对路径。
+
+```sh
+dsh plugin --profile web add "/path/to/dsh-fleet-shell-0.9.8.tgz" --ignore-scripts
+```
+
+打开或重启该 Profile，然后在侧栏启用工作区的 Fleet，再在工作区对话中发送 `/fleet help`。
+
+### 从源码构建
+
+准备 Node.js 22.15 或更高版本以及 pnpm，在仓库根目录执行下面的命令。打包后按上面的桌面端或 CLI 步骤安装生成的 `.tgz`。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+pnpm check:package
+pnpm --dir packages/fleet-shell pack
+```
 
 ## 快速上手
 
@@ -80,33 +115,6 @@ Fleet 的 OA 审核关卡定义了哪个阶段的结果要审、由谁审，以�
 *图中审核 Agent 要检查 `release-guide.md` 的第 1 版，并在干净的工作区重跑安装示例。如果发现某条命令与发布候选版本不符，它可以附上问题退回。页首的发布指南截图展示了人工放行或退回的操作。*
 
 以上产品截图均使用真实 Fleet 界面与隔离演示数据。
-
-## 构建与安装
-
-Fleet `0.9.8` 要求 **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.2.2-rc.5`**，插件包名为 `@dsh-fleet/shell`。
-
-从 [GitHub Releases](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases) 下载 `dsh-fleet-shell-0.9.8.tgz`。在 DSH 桌面端打开「插件 → 添加插件」，填入下载文件的绝对路径。CLI 管理的 Profile 可以使用下方命令，换成自己的 Profile 名称和归档路径。
-
-### 从源码构建
-
-准备 Node.js 22.15 或更高版本以及 pnpm，然后从仓库根目录运行：
-
-```sh
-pnpm install --frozen-lockfile
-pnpm build
-pnpm check:package
-pnpm --dir packages/fleet-shell pack
-```
-
-**DSH 桌面端。** 打开「插件 → 添加插件」，使用本地构建后 `packages/fleet-shell` 目录的绝对路径添加插件。界面提示启用时，启用插件。
-
-**CLI 管理的 DSH。** 把 `web` 换成实际使用的 Profile 名字，把示例路径换成生成的 `dsh-fleet-shell-0.9.8.tgz` 文件的绝对路径：
-
-```sh
-dsh plugin --profile web add "/path/to/dsh-fleet-shell-0.9.8.tgz" --ignore-scripts
-```
-
-启动或重启该 Profile，为目标工作区启用 Fleet，然后在工作区对话发送 `/fleet help` 查看可用命令。
 
 ## 项目文档
 

@@ -8,11 +8,46 @@ Run operations from a project folder. Use the Workspace to see everything in fli
 
 `oh-my-dsh-fleet` is a DeepSeek Harness (DSH) plugin for multi-agent workflow orchestration. It turns a chat request into a Ticket with a runnable standard operating procedure (SOP). Review the plan before starting, then follow each stage in its native DSH session. Save a workflow that works as a template for the next run.
 
+![Fleet cover showing parallel tasks, agent and human reviews, rework, and final delivery](.github/assets/social-preview.png)
+
+**Compatibility** · Fleet `0.9.8` · DeepSeek Harness `0.2.2-rc.5` · [Download the plugin](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.9.8/dsh-fleet-shell-0.9.8.tgz)
+
 ![Fleet Ticket showing two completed agent nodes, a pending human review gate, and the release guide file at version 1](.github/assets/fleet-ticket-flow.png)
 
 *A release SOP in action. Two agents have drafted the guide and verified the setup examples. The final delivery step waits for you to review `release-guide.md`.*
 
-[Workspace operations](#run-each-workspace-as-an-operating-unit) · [Ticket lifecycle](#take-each-ticket-from-request-to-delivery) · [Agent execution](#plan-and-inspect-every-stage) · [Review and rework](#set-up-approval-gates) · [Quick start](#quick-start) · [Build and install](#build-and-install)
+[Workspace operations](#run-each-workspace-as-an-operating-unit) · [Ticket lifecycle](#take-each-ticket-from-request-to-delivery) · [Agent execution](#plan-and-inspect-every-stage) · [Review and rework](#set-up-approval-gates) · [Quick start](#quick-start) · [Install and compatibility](#install-and-compatibility)
+
+## Install and compatibility
+
+Fleet **`0.9.8`** ships as `@dsh-fleet/shell`. Its manifest requires **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.2.2-rc.5`**. If you use the CLI, run `dsh --version` to check your host version.
+
+### DeepSeek Harness Desktop
+
+1. Download [`dsh-fleet-shell-0.9.8.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.9.8/dsh-fleet-shell-0.9.8.tgz) from [Release v0.9.8](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8). Keep the archive compressed.
+2. In DSH, open **Plugins → Add plugin** and enter the absolute path to the downloaded archive. Enable `oh-my-dsh-fleet` after installation and restart if prompted.
+3. Enable Fleet for your workspace from the Fleet sidebar. Open a native chat in that workspace and send `/fleet help` to verify that the commands are available.
+
+### CLI-managed DSH profiles
+
+Replace `web` with your active profile name and use the absolute path to the downloaded archive.
+
+```sh
+dsh plugin --profile web add "/path/to/dsh-fleet-shell-0.9.8.tgz" --ignore-scripts
+```
+
+Open or restart that profile, enable Fleet for your workspace from the sidebar, and send `/fleet help` in a workspace chat.
+
+### Build from source
+
+With Node.js 22.15 or later and pnpm, run these commands from the repository root. Install the resulting `.tgz` using the Desktop or CLI instructions above.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+pnpm check:package
+pnpm --dir packages/fleet-shell pack
+```
 
 ## Quick start
 
@@ -80,33 +115,6 @@ A review gate defines which outputs to inspect, who reviews them, and which down
 *This reviewer is set up to inspect version 1 of `release-guide.md` and run the setup examples in a clean workspace. If a command differs from the release candidate, the reviewer can send it back with that finding. The release guide screenshot above shows the equivalent human review controls.*
 
 Product screenshots show the actual Fleet interface with isolated demo data.
-
-## Build and install
-
-Fleet `0.9.8` requires **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.2.2-rc.5`**. The plugin bundle is `@dsh-fleet/shell`.
-
-Download `dsh-fleet-shell-0.9.8.tgz` from [GitHub Releases](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases). In DSH Desktop use **Plugins → Add plugin** and enter the absolute path to the downloaded archive. For a CLI-managed profile, use the command below with your profile name and the archive path.
-
-### Build from source
-
-Run these commands from the repository root with Node.js 22.15 or later and pnpm:
-
-```sh
-pnpm install --frozen-lockfile
-pnpm build
-pnpm check:package
-pnpm --dir packages/fleet-shell pack
-```
-
-**DSH Desktop.** Open **Plugins → Add plugin** and select the built `packages/fleet-shell` directory from your checkout using its absolute path. Enable the bundle if prompted.
-
-**CLI-managed DSH.** Replace `web` with your active profile name and use the absolute path to the generated `dsh-fleet-shell-0.9.8.tgz`:
-
-```sh
-dsh plugin --profile web add "/path/to/dsh-fleet-shell-0.9.8.tgz" --ignore-scripts
-```
-
-Open or restart that DSH profile, enable Fleet for your workspace, and send `/fleet help` in a workspace chat to see the available commands.
 
 ## Documentation
 
