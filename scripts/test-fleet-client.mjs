@@ -348,6 +348,113 @@ test('recreation respects a native input preservation refusal and performs no re
   assert.equal(h.requests.some(row=>row.options.method==='POST'),false);
 });
 
+test('compatible and incompatible drafts open a cancellable confirmation and refresh after deletion',async t=>{
+  const compatible=sampleTicket('w1','compatible-delete','draft');
+  compatible.plan.title='Current draft title';
+  const legacy={...incompatibleTicket(),title:'Legacy draft title'};
+  const stopped=sampleTicket('w1','retained-stopped','stopped');
+  let tickets=[compatible,legacy,stopped];
+  const h=await harness(t,{sidebar:true,drafts:[compatible],fetcher:(url,options)=>{
+    if(url!=='/api/fleet/action')return response(view('w1',tickets));
+    const {action,ticketId}=JSON.parse(options.body);
+    tickets=tickets.filter(ticket=>ticket.id!==ticketId);
+    return response({schemaVersion:1,workspaceId:'w1',action,result:{deletedTicketId:ticketId}});
+  }});
+  const panel=()=>h.render('dsh-fleet');
+  const actions=()=>h.requests.filter(row=>row.url==='/api/fleet/action');
+  const viewReads=()=>h.requests.filter(row=>row.url.startsWith('/api/fleet/view')).length;
+  const form=()=>h.all(panel()).find(node=>node.type==='form');
+  const tab=()=>h.render('oh-my-dsh-fleet');
+  const tabSelected=id=>h.all(tab()).some(node=>node.props['data-fleet-ticket-card']===id);
+  h.open();await setImmediate();
+  h.button(panel(),'data-fleet-tab','tickets').props.onClick();
+  h.button(tab(),'data-fleet-tab','tickets').props.onClick();
+  h.button(tab(),'data-open-ticket',compatible.id).props.onClick();
+  assert.ok(tabSelected(compatible.id));
+  assert.equal(h.button(panel(),'data-fleet-draft-delete',stopped.id),undefined);
+  assert.ok(h.button(panel(),'data-open-ticket',compatible.id));
+  assert.equal(h.button(panel(),'data-open-ticket',legacy.id),undefined);
+  const search=()=>h.all(panel()).find(node=>node.type==='input'&&node.props.type==='search');
+  search().props.onChange({target:{value:compatible.plan.title}});
+  assert.ok(h.button(panel(),'data-fleet-draft-delete',compatible.id));
+  assert.equal(h.button(panel(),'data-fleet-draft-delete',legacy.id),undefined);
+  search().props.onChange({target:{value:''}});
+
+  for(const [ticket,title] of [[compatible,compatible.plan.title],[legacy,legacy.title]]){
+    assert.ok(h.all(panel()).some(node=>node.type==='summary'&&node.props['data-fleet-draft-menu']===ticket.id));
+    const open=()=>h.button(panel(),'data-fleet-draft-delete',ticket.id).props.onClick();
+    const postsBefore=actions().length;
+    open();
+    assert.ok(h.all(form()).some(node=>node.children.some(value=>typeof value==='string'&&value.includes(title))));
+    assert.equal(actions().length,postsBefore);
+    h.button(panel(),'data-fleet-draft-delete-cancel','').props.onClick();
+    assert.equal(form(),undefined);
+    assert.equal(actions().length,postsBefore);
+
+    const readsBefore=viewReads();
+    open();
+    const submit=form().props.onSubmit;
+    const first=submit({preventDefault(){}});
+    assert.equal(h.button(panel(),'data-fleet-draft-delete-confirm','').props.disabled,true);
+    await submit({preventDefault(){}});
+    await first;
+    assert.equal(actions().length,postsBefore+1);
+    assert.deepEqual(JSON.parse(actions().at(-1).options.body),{workspaceId:'w1',action:'draft-delete',ticketId:ticket.id,expectedRevision:ticket.revision});
+    assert.equal(viewReads(),readsBefore+1);
+    assert.equal(form(),undefined);
+    assert.equal(h.button(panel(),'data-fleet-draft-delete',ticket.id),undefined);
+    assert.equal(tabSelected(ticket.id),false);
+    assert.ok(h.button(tab(),'data-open-ticket',stopped.id),'Session Tab returns from the deleted Ticket to its list');
+  }
+  const pane=h.render(PANE_KEY,paneAddress(compatible.id));
+  assert.ok(h.all(pane).some(node=>node.props.role==='alert'&&node.children.includes('此对话中的 Ticket 已不可用。')));
+  assert.deepEqual(h.calls,[['panel','dsh-fleet']]);
+});
+
+test('draft delete keeps its error and requires renewed confirmation when the revision changes',async t=>{
+  const draft=sampleTicket('w1','stale-delete','draft');
+  draft.plan.title='First title';
+  let current=draft;
+  const h=await harness(t,{fetcher:(url)=>{
+    if(url!=='/api/fleet/action')return response(view('w1',[current]));
+    current={...draft,revision:draft.revision+1,plan:{...draft.plan,title:'New title'}};
+    return {ok:false,status:409,json:async()=>({error:{code:'fleet/stale-revision',message:'Draft revision changed'}})};
+  }});
+  h.open();await setImmediate();
+  const panel=()=>h.render('dsh-fleet');
+  const open=()=>h.button(panel(),'data-fleet-draft-delete',draft.id).props.onClick();
+  const form=()=>h.all(panel()).find(node=>node.type==='form');
+  open();
+  await form().props.onSubmit({preventDefault(){}});
+  assert.ok(h.all(form()).some(node=>node.props.role==='alert'&&node.children.some(value=>typeof value==='string'&&value.includes('Draft revision changed'))));
+  assert.ok(h.button(panel(),'data-fleet-draft-delete-confirm','').props.disabled);
+  await form().props.onSubmit({preventDefault(){}});
+  assert.equal(h.requests.filter(row=>row.url==='/api/fleet/action').length,1);
+  h.button(panel(),'data-fleet-draft-delete-cancel','').props.onClick();
+  open();
+  assert.ok(h.all(form()).some(node=>node.children.some(value=>typeof value==='string'&&value.includes('New title'))));
+  assert.equal(h.button(panel(),'data-fleet-draft-delete-confirm','').props.disabled,false);
+});
+
+test('draft delete reports all referencing Tickets and schedules in the confirmation',async t=>{
+  const draft=sampleTicket('w1','referenced-delete','draft');
+  const h=await harness(t,{fetcher:url=>url!=='/api/fleet/action'?response(view('w1',[draft])):{ok:false,status:409,json:async()=>({error:{
+    code:'fleet/ticket-referenced',message:'Draft is referenced',references:[
+      {kind:'ticket',id:'consumer',title:'Review backlog'},
+      {kind:'series',id:'series-1',title:'Daily schedule'},
+      {kind:'ticket',id:'consumer-2',title:'Another report'}
+    ]
+  }})}});
+  h.open();await setImmediate();
+  const panel=()=>h.render('dsh-fleet');
+  h.button(panel(),'data-fleet-draft-delete',draft.id).props.onClick();
+  const form=()=>h.all(panel()).find(node=>node.type==='form');
+  await form().props.onSubmit({preventDefault(){}});
+  const alert=h.all(form()).find(node=>node.props.role==='alert');
+  assert.match(alert.children[0],/任务「Review backlog」\(consumer\).*计划「Daily schedule」\(series-1\).*任务「Another report」\(consumer-2\)/);
+  assert.ok(h.button(panel(),'data-fleet-draft-delete',draft.id));
+});
+
 test('failed, interrupted and cancelled nodes in a running Ticket still expose the model seat; completed nodes do not',()=>{
   const ticket=evidenceTicket();
   const catalog={agents:[],orchestrations:[],modelCatalog:{default:{provider:'host',model:'default'},groups:[{id:'host',models:[{id:'default',reasoning:{efforts:[{id:'high'}]}}]}]}};

@@ -226,7 +226,7 @@ export class FleetService {
       const { result, state } = await this.#store.transact(scope, fn);
       this.#core = FleetCore.fromState(state); return result;
     } catch (error) {
-      if (!error.code || !['store-busy', 'invalid-input', 'unsupported-contract', 'legacy-plan', 'stale-revision', 'control-locked', 'unknown-ticket', 'unknown-series', 'scope-required', 'dependency-wait', 'unknown-workspace', 'unknown-node', 'unknown-gate', 'unknown-agent', 'unknown-flow', 'state-conflict', 'not-running', 'not-runnable', 'stale-attempt', 'stale-dispatch', 'not-reviewable', 'invalid-flow', 'incomplete-plan', 'unsupported-profile', 'completed-work-conflict', 'repair-required', 'duplicate-id', 'draft-scope', 'session-conflict', 'evidence-required', 'session-scope'].includes(error.code)) this.#fault = `Fleet persistence failed; dispatch paused: ${errorText(error)}`;
+      if (!error.code || !['store-busy', 'invalid-input', 'unsupported-contract', 'legacy-plan', 'stale-revision', 'control-locked', 'ticket-referenced', 'unknown-ticket', 'unknown-series', 'scope-required', 'dependency-wait', 'unknown-workspace', 'unknown-node', 'unknown-gate', 'unknown-agent', 'unknown-flow', 'state-conflict', 'not-running', 'not-runnable', 'stale-attempt', 'stale-dispatch', 'not-reviewable', 'invalid-flow', 'incomplete-plan', 'unsupported-profile', 'completed-work-conflict', 'repair-required', 'duplicate-id', 'draft-scope', 'session-conflict', 'evidence-required', 'session-scope'].includes(error.code)) this.#fault = `Fleet persistence failed; dispatch paused: ${errorText(error)}`;
       throw error;
     }
   }
@@ -461,7 +461,7 @@ export class FleetService {
   modelCatalog() { return this.#enqueue(() => this.#adapter.modelCatalog(), true); }
   /** Caller identity must be obtained from the authenticated user path, not tool arguments. */
   human(workspaceId, userId, action, args = []) {
-    const allowed = new Set(['start', 'stop', 'resume', 'retryNode', 'enableDependencies', 'disableDependencies', 'commentNode', 'changeNode', 'setPendingNodeModel', 'forcePassGate', 'reviewGate', 'deliverOverride', 'abandonTicket', 'unabandonTicket', 'replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'instantiateTemplate', 'repairTicket', 'regenerateTicket']);
+    const allowed = new Set(['start', 'stop', 'resume', 'retryNode', 'enableDependencies', 'disableDependencies', 'commentNode', 'changeNode', 'setPendingNodeModel', 'forcePassGate', 'reviewGate', 'deliverOverride', 'deleteDraftTicket', 'abandonTicket', 'unabandonTicket', 'replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'instantiateTemplate', 'repairTicket', 'regenerateTicket']);
     try { args = jsonClone(args); } catch (e) { return Promise.reject(new FleetCoreError('invalid-input', e.message)); }
     return this.#enqueue(async () => {
       guard(allowed.has(action), 'unknown-action', 'Unknown human Fleet action.');

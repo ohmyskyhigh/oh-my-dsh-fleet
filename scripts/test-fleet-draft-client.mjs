@@ -28,6 +28,18 @@ test('polling only refreshes records; it never opens a resource for new drafts, 
   assert.equal(f.calls.every(call=>(call.options.method??'GET')==='GET'),true,'the draft client never writes or navigates on its own');
 });
 
+test('a deleted draft disappears from its Session even if an older detail response arrives later',async()=>{
+  const address={...scope,draftId:'d1'};
+  let resolveDetail,rows=[draft()];
+  const f=fixture(url=>url.includes('draftId=')?new Promise(done=>{resolveDetail=done;}):envelope(rows));
+  await f.client.poll();
+  const pendingDetail=f.client.load(address);
+  rows=[];await f.client.poll();
+  resolveDetail(envelope([draft()]));await pendingDetail;
+  assert.equal(f.client.latest(scope),null);
+  assert.equal(f.client.record(address).draft,null);
+});
+
 test('late responses only update records and cannot navigate another active Session',async()=>{
   let resolve;const f=fixture(()=>new Promise(done=>{resolve=done;}));
   const read=f.client.poll();f.select({workspaceId:'w2',sessionId:'s2'});resolve(envelope([draft()]));await read;

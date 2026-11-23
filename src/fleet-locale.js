@@ -4,13 +4,13 @@ export const fleetDictionaries = {
   en: {
     control:'oh-my-dsh-fleet', console:'oh-my-dsh-fleet · Control center', registered:'Registered workspaces', enabledCount:'Enabled workspaces', available:'Available', modeOn:'Enabled', modeOff:'Not enabled', enable:'Enable', disable:'Disable', openFleet:'Open Dashboard', refresh:'Refresh', loading:'Loading workspace modes…', saving:'Saving…', retry:'Retry', empty:'No registered workspaces yet. Add one from the sidebar.', controlIntro:'Choose a workspace to view its Tickets, Agents and orchestration. Each workspace keeps its own tasks.', disabledTarget:'Fleet is not enabled for this workspace. Enable it from the control center.', toControl:'Control center', saved:'Workspace mode saved', actionSaved:'Changes saved',
     panel:'oh-my-dsh-fleet', preview:'Workspace', title:'oh-my-dsh-fleet Dashboard', sessions:'Workspace sessions', noSessions:'No sessions yet.', openSession:'Open chat', newSession:'New workspace chat', untitled:'New session', status:'Status', open:'Open oh-my-dsh-fleet for {name}', unavailable:'This workspace is no longer available. Choose another workspace.', returnToConversation:'Back to conversation', returnHint:'Return with the original Session and draft preserved.', viewDraftSection:'Ticket draft', viewOpenSidebar:'Open in sidebar', viewNoWorkspace:'This session does not belong to a Fleet-enabled workspace.', viewNoDraft:'No Ticket draft in this session yet.', viewNoDraftHint:'Send /fleet new <request> in the chat to create one; then edit and confirm it here.', viewExecution:'Execution', viewNoExecution:'No started Ticket is bound to this session yet.', viewOpenTicket:'Open Ticket page',
-    dependencyWaitFailed:'This Ticket is waiting for its upstream dependencies. Review the dependency status on the Ticket page.',
+    ticketUnavailable:'This Ticket is no longer available in this conversation.', draftDeleted:'Draft deleted.', draftReferenced:'This draft is referenced by {references}.', referringTicket:'Ticket “{title}” ({id})', referringSeries:'Schedule “{title}” ({id})', dependencyWaitFailed:'This Ticket is waiting for its upstream dependencies. Review the dependency status on the Ticket page.',
     requestFailed:'The operation could not be completed. Details: {detail}', invalidResponseVersion:'The Fleet response version is not supported. Refresh and try again.', invalidModesResponse:'Fleet returned an invalid workspace list. Refresh and try again.', invalidWorkspaceResponse:'Fleet returned data for an unexpected workspace. Refresh and try again.', invalidActionResponse:'Fleet returned an unexpected action result. Refresh and check the task status.', ticketConfigurationLocked:'Ticket configuration is locked. Your unsaved changes are retained; edit after the Ticket has fully stopped.'
   },
   zh: {
     control:'oh-my-dsh-fleet', console:'oh-my-dsh-fleet · 中控台', registered:'已注册工作区', enabledCount:'已开启工作区', available:'可开启', modeOn:'已开启', modeOff:'未开启', enable:'开启', disable:'关闭', openFleet:'进入工作区面板', refresh:'刷新', loading:'正在读取工作区状态…', saving:'正在保存…', retry:'重试', empty:'还没有注册工作区，请先从侧栏添加。', controlIntro:'选择工作区，查看任务、智能体与编排。每个工作区独立保存自己的任务。', disabledTarget:'此工作区尚未开启 Fleet，请从中控台开启。', toControl:'中控台', saved:'工作区模式已保存', actionSaved:'操作已保存',
     panel:'oh-my-dsh-fleet', preview:'工作区', title:'oh-my-dsh-fleet 工作区面板', sessions:'工作区会话', noSessions:'暂无会话。', openSession:'打开对话', newSession:'新建工作区对话', untitled:'新会话', status:'状态', open:'打开“{name}”的 oh-my-dsh-fleet', unavailable:'此工作区已不可用，请选择其他工作区。', returnToConversation:'返回对话', returnHint:'回到原来的会话，保留对话草稿。', viewDraftSection:'任务草稿', viewOpenSidebar:'在侧栏打开', viewNoWorkspace:'此会话不属于已启用 Fleet 的工作区。', viewNoDraft:'这个会话还没有任务草稿。', viewNoDraftHint:'在对话里发送 /fleet new <需求> 即创建草稿，随后在此编辑与确认。', viewExecution:'执行情况', viewNoExecution:'此会话暂无已启动的任务。', viewOpenTicket:'打开任务页',
-    dependencyWaitFailed:'此 Ticket 正在等待上游依赖。请在任务页查看依赖状态。',
+    ticketUnavailable:'此对话中的 Ticket 已不可用。', draftDeleted:'草稿已删除。', draftReferenced:'以下项目正在引用此草稿，无法删除：{references}。', referringTicket:'任务「{title}」({id})', referringSeries:'计划「{title}」({id})', dependencyWaitFailed:'此 Ticket 正在等待上游依赖。请在任务页查看依赖状态。',
     requestFailed:'操作未完成。详细信息：{detail}', invalidResponseVersion:'Fleet 响应版本不匹配，请刷新后重试。', invalidModesResponse:'Fleet 返回的工作区列表有误，请刷新后重试。', invalidWorkspaceResponse:'Fleet 返回的工作区数据不匹配，请刷新后重试。', invalidActionResponse:'Fleet 返回的操作结果不匹配，请刷新并核对任务状态。', ticketConfigurationLocked:'任务配置已锁定。本地未保存修改已保留，请等待任务完全停止后再编辑。'
   }
 };
@@ -21,10 +21,18 @@ export function fleetTranslator(language) {
 export function fleetResponseError(key) { return Object.assign(new Error(key), {fleetMessageKey:key}); }
 export function fleetErrorRecord(error) {
   if (error?.fleetMessageKey) return {key:error.fleetMessageKey};
+  if (error?.code==='fleet/ticket-referenced'&&Array.isArray(error.references)&&error.references.length) return {key:'draftReferenced',references:error.references};
   const key = error?.code === 'fleet/dependency-wait' ? 'dependencyWaitFailed' : 'requestFailed';
   return {key,detail:String(error?.message ?? error)};
 }
-export function fleetErrorText(error,t) { return !error ? null : typeof error==='string' ? error : t(error.key,{detail:error.detail??''}); }
+export function fleetErrorText(error,t) {
+  if(!error||typeof error==='string')return error||null;
+  if(error.key==='draftReferenced'){
+    const references=error.references.map(ref=>t(ref.kind==='series'?'referringSeries':'referringTicket',{id:ref.id,title:ref.title||ref.id}));
+    return t(error.key,{references:references.join(' · ')});
+  }
+  return t(error.key,{detail:error.detail??''});
+}
 export function createFleetLanguage(hostLocale, {storage=()=>globalThis.localStorage,events=globalThis.window}={}) {
   const valid=value=>value==='zh'||value==='en'?value:'auto';
   const read=()=>{try{return valid(storage()?.getItem(fleetLanguageStorageKey));}catch{return 'auto';}};

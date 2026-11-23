@@ -53,6 +53,37 @@ test('P-69 manual abandonment: CAS, draft/stopped only, start blocked until reve
   const wrongStatus = structuredClone(state); wrongStatus.workspaces[0].tickets[0].abandonedAt = new Date().toISOString();
   assert.throws(() => FleetCore.fromState(wrongStatus), e => e.code === 'invalid-state', 'running Ticket cannot carry abandonment');
 });
+test('draft deletion protects current and frozen dependencies, series receipts and replacement links', () => {
+  const f = fixture();
+  const saved = p => f.core.saveDraftTicket('w', { id: 'other', plan: p });
+  const remove = () => f.human.deleteDraftTicket('t', 1);
+  const p = plan(); p.nodes[1].ticketDependencies = ['t'];
+  saved(p); rejects(remove, 'ticket-referenced');
+  f.human.start('other'); f.human.stop('other');
+  f.core.saveDraftTicket('w', { ticketId: 'other', expectedRevision: f.core.readTicket('w', 'other').revision, plan: plan() });
+  rejects(remove, 'ticket-referenced'); // The original execution still has its Node dependency.
+  for (const role of ['source', 'dependency', 'occurrence']) {
+    const {core, human} = fixture(), seriesPlan = plan();
+    if (role !== 'source') seriesPlan.ticketDependencies = ['t'];
+    core.createSeries('w', { id: 'series', name: 'Example', sourceTicketId: role === 'source' ? 't' : null,
+      plan: seriesPlan, scheduleId: 'clock', targetSessionId: 'origin', timing: {kind: 'daily'} });
+    const target = role === 'occurrence' ? core.recordOccurrenceAndStart('w', 'series', {occurrenceAt: '2026-11-22T09:00:00Z'}).ticketId : 't';
+    core.setSeriesStatus('w', 'series', 'ended');
+    rejects(() => human.deleteDraftTicket(target, core.readTicket('w', target).revision), 'ticket-referenced');
+  }
+  const g = fixture(), fresh = g.human.regenerateTicket('t', 1, plan());
+  // Only the predecessor's replacement link is released; the predecessor record itself stays.
+  assert.deepEqual(g.human.deleteDraftTicket(fresh.id, fresh.revision), {deletedTicketId: fresh.id});
+  const predecessor = g.read();
+  assert.equal(predecessor.id, 't'); assert.equal(predecessor.supersededBy, undefined); assert.equal(predecessor.replacementDeleted.ticketId, fresh.id);
+  assert.equal(predecessor.activity.at(-1).type, 'replacement-deleted');
+  assert.doesNotThrow(() => FleetCore.fromState(g.core.exportState()));
+  rejects(() => g.human.deleteDraftTicket('t', g.read().revision), 'control-locked');
+  // A real dependency still blocks deletion even when the same Ticket also replaced the draft.
+  const h = fixture(), replaced = h.human.regenerateTicket('t', 1, plan());
+  h.core.saveDraftTicket('w', { id: 'consumer', plan: (() => { const p = plan(); p.nodes[1].ticketDependencies = [replaced.id]; return p; })() });
+  rejects(() => h.human.deleteDraftTicket(replaced.id, replaced.revision), 'ticket-referenced');
+});
 test('CAS uses original revision and rejects replacement without mutation', () => {
   const f = fixture(), old = f.read(); f.save({ ...old.plan, goal: 'winner' });
   rejects(() => f.core.saveDraftTicket('w', { ticketId: 't', expectedRevision: old.revision, plan: old.plan }), 'stale-revision'); assert.equal(f.read().plan.goal, 'winner');

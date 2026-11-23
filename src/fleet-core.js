@@ -1,7 +1,7 @@
 /** Synchronous canonical Ticket domain. Trusted capabilities never escape to Agent tools. */
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { PLAN_CONTRACT_VERSION, TICKET_STATUSES, normalizePlan, validatePlan, isCurrentPlan, repairLegacyPlan, projectTemplate, deliverableView, isUtcInstant as utc } from './fleet-model.js';
+import { PLAN_CONTRACT_VERSION, TICKET_STATUSES, normalizePlan, validatePlan, isCurrentPlan, repairLegacyPlan, projectTemplate, deliverableView, readableTitle, isUtcInstant as utc } from './fleet-model.js';
 
 export class FleetCoreError extends Error {
   constructor(code, message) { super(message); this.name = 'FleetCoreError'; this.code = code; }
@@ -251,6 +251,8 @@ export class FleetCore {
           requireThat(t.workspaceId === w.id && Number.isSafeInteger(t.revision) && t.revision > 0 && TICKET_STATUSES.includes(t.status), 'invalid-state', 'Invalid Ticket identity, revision or status.');
           // P-69 manual abandonment: optional; absent on every pre-existing record (compat).
           if (t.abandonedAt !== undefined) requireThat(utc(t.abandonedAt) && ['draft', 'stopped'].includes(t.status), 'invalid-state', 'Invalid Ticket abandonment record.');
+          // Deleting a replacement draft leaves its predecessor readable without a dangling link.
+          if (t.replacementDeleted !== undefined) requireThat(isRecord(t.replacementDeleted) && typeof t.replacementDeleted.ticketId === 'string' && !!t.replacementDeleted.ticketId && utc(t.replacementDeleted.time) && t.supersededBy === undefined, 'invalid-state', 'Invalid deleted-replacement record.');
           requireThat(Array.isArray(t.activity) && Object.hasOwn(t, 'execution'), 'invalid-state', 'Invalid canonical Ticket.');
           requireThat(!['snapshot', 'nodes', 'gates', 'events', 'changes', 'goal', 'inputs', 'criteria'].some(k => Object.hasOwn(t, k)), 'invalid-state', 'Ticket contains persisted display aliases.');
           if (!t.legacy) {
@@ -842,6 +844,40 @@ export class FleetCore {
         if (t.dependencyAuthorization) { delete t.dependencyAuthorization; this.#touch(t); this.#event(t, 'dependencies-disabled', actor); }
         return copy(t);
       },
+      deleteDraftTicket: (id, expectedRevision) => {
+        const workspace = this.#workspace(ws), ticket = this.#ticket(ws, id);
+        this.#cas(ticket, expectedRevision);
+        requireThat(ticket.status === 'draft' && ticket.execution === null, 'control-locked', 'Only a draft without execution history can be deleted.');
+        // Historical plans can have an incompatible shape. Inspect the known reference
+        // fields directly without normalizing, repairing or rewriting those plans.
+        const dependsOnDraft = part => Array.isArray(part?.ticketDependencies) && part.ticketDependencies.includes(id);
+        const referencesDraft = plan => dependsOnDraft(plan) || (Array.isArray(plan?.nodes) && plan.nodes.some(dependsOnDraft));
+        const references = [], superseded = [];
+        for (const other of workspace.tickets) {
+          if (other === ticket) continue;
+          const replacementOnly = other.supersededBy === id;
+          if (Object.values(other.dependencyBindings ?? {}).includes(id) || referencesDraft(other.plan)
+            || Object.values(other.execution?.configurations ?? {}).some(config => referencesDraft(config?.plan))) {
+            const goal = other.plan?.goal ?? other.plan?.ticket?.goal;
+            const title = typeof other.plan?.title === 'string' && other.plan.title.trim() || (typeof goal === 'string' && readableTitle(goal)) || other.id;
+            references.push({kind: 'ticket', id: other.id, title});
+          } else if (replacementOnly) superseded.push(other);
+        }
+        for (const series of workspace.series ?? []) {
+          if (series.sourceTicketId === id || series.occurrences.some(o => o.ticketId === id) || referencesDraft(series.plan)) {
+            references.push({kind: 'series', id: series.id, title: series.name});
+          }
+        }
+        if (references.length) throw Object.assign(new FleetCoreError('ticket-referenced', 'Other Tickets or series reference this draft.'), {references});
+        for (const old of superseded) {
+          delete old.supersededBy;
+          old.replacementDeleted = {ticketId: id, time: now()};
+          this.#touch(old);
+          this.#event(old, 'replacement-deleted', actor, {ticketId: id});
+        }
+        workspace.tickets.splice(workspace.tickets.indexOf(ticket), 1);
+        return { deletedTicketId: id };
+      },
       // P-69: the user explicitly abandons this one Ticket. Series schedules are untouched;
       // future occurrences keep creating their own Tickets from the frozen series plan.
       abandonTicket: (id, expectedRevision, reason) => {
@@ -893,6 +929,7 @@ export class FleetCore {
         requireThat(!isCurrentPlan(t.plan) || t.legacy, 'state-conflict', 'Ticket already uses the current plan contract.');
         let plan;
         try { plan = replacement === undefined ? repairLegacyPlan(t.plan, t.legacy?.context) : planInput(replacement); } catch (e) { throw new FleetCoreError(e.code ?? 'repair-required', e.message); }
+        this.#validateDependencies(this.#workspace(ws), id, plan, null, t.dependencyBindings);
         if (t.execution) {
           requireThat(this.#config(t).plan, 'repair-required', 'Historical execution has no unambiguous plan; preserve it read-only.'); this.#preserveCompleted(t, plan);
         }

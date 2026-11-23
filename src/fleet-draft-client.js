@@ -6,7 +6,8 @@ import { TICKET_STATUSES } from './fleet-model.js';
 // the shared Dashboard Ticket detail themselves (Tab / side pane / fullscreen).
 export function createFleetDraftClient({decode,fetcher=(...args)=>fetch(...args),getScope,signal,isEnabled=()=>true}) {
   const records=new Map(),listeners=new Set(),epochs=new Map(),pending=new Set();
-  let version=0,disposed=false;
+  const acceptedReads=new Map();
+  let readSequence=0,version=0,disposed=false;
   const scopeKey=scope=>JSON.stringify([scope.workspaceId,scope.sessionId]);
   const recordKey=scope=>JSON.stringify([scope.workspaceId,scope.sessionId,scope.draftId]);
   const sessionOf=value=>value?.originSessionId??value?.sessionId;
@@ -32,7 +33,7 @@ export function createFleetDraftClient({decode,fetcher=(...args)=>fetch(...args)
     if(disposed||!validScope(scope)||!isEnabled(scope.workspaceId))return null;
     const key=scopeKey(scope),requestKey=JSON.stringify([key,draftId??null]);
     if(pending.has(requestKey)&&!force)return null;
-    const epoch=epochs.get(key)||0;
+    const epoch=epochs.get(key)||0,sequence=++readSequence;
     pending.add(requestKey);
     try {
       const query=new URLSearchParams({workspaceId:scope.workspaceId,sessionId:scope.sessionId,...(draftId?{draftId}:{})});
@@ -42,6 +43,14 @@ export function createFleetDraftClient({decode,fetcher=(...args)=>fetch(...args)
       if(body.selectedDraft)validate(body.selectedDraft,scope);
       if(draftId&&body.selectedDraft?.id!==draftId)throw new Error('Fleet draft is unavailable');
       if(disposed||(epochs.get(key)||0)!==epoch||!isEnabled(scope.workspaceId))return null;
+      if(sequence<(acceptedReads.get(key)||0))return null;
+      acceptedReads.set(key,sequence);
+      if(!draftId){
+        const presentIds=new Set(body.drafts.map(draft=>draft.id));
+        for(const [address,row] of records){
+          if(!row.busy&&sameScope(row.draft,scope)&&!presentIds.has(row.draft.id))records.delete(address);
+        }
+      }
       for(const draft of body.drafts)accept(draft);
       if(body.selectedDraft)accept(body.selectedDraft,{force:force&&!!draftId});
       notify();

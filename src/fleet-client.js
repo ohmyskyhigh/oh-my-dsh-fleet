@@ -49,7 +49,7 @@ export function createFleetPlugin(require) {
       const registered=id=>ctx.workspaces.list.getSnapshot().items.some(item=>item.workspaceId===id);
       async function decode(response) {
         const body=await response.json();
-        if(!response.ok)throw Object.assign(new Error(body.error?.message||body.message||`HTTP ${response.status}`),{code:body.error?.code});
+        if(!response.ok)throw Object.assign(new Error(body.error?.message||body.message||`HTTP ${response.status}`),{code:body.error?.code,references:body.error?.references});
         if(body.schemaVersion!==1)throw fleetResponseError('invalidResponseVersion');
         return body;
       }
@@ -88,7 +88,7 @@ export function createFleetPlugin(require) {
           if(disposed||view.requestId!==requestId)return;
           if(!registered(id)||!state.enabledWorkspaceIds.includes(id)){view.data={...view.data,pending:false};notifyViews();return;}
           view.data={...body,ready:true,pending:false,error:null};
-          if(view.ui.page==='ticket'&&isIncompatibleDraft(body.tickets.find(ticket=>ticket.id===view.ui.ticketId)))view.ui={...view.ui,page:'tickets',ticketId:null,nodeId:null,dialog:null};
+          reconcileTicketSelections(id);
           notifyViews();
         }catch(error){if(!disposed&&view.requestId===requestId){view.data={...view.data,pending:false,error:fleetErrorRecord(error)};notifyViews();}}
       }
@@ -101,16 +101,28 @@ export function createFleetPlugin(require) {
         view.requestId++;view.data={...view.data,pending:false};target.patch({error:null,dialogError:null,notice:null});
         try {
           const body=await decode(await fetch('/api/fleet/action',{method:'POST',credentials:'same-origin',signal:abort.signal,headers:{'content-type':'application/json'},body:JSON.stringify({workspaceId:id,action,...args})}));
-          if(body.workspaceId!==id||body.action!==action)throw fleetResponseError('invalidActionResponse');
+          if(body.workspaceId!==id||body.action!==action||(action==='draft-delete'&&body.result?.deletedTicketId!==args.ticketId))throw fleetResponseError('invalidActionResponse');
           if(disposed)return null;
+          if(action==='draft-delete'){
+            view.data={...view.data,tickets:view.data.tickets.filter(ticket=>ticket.id!==args.ticketId)};
+            reconcileTicketSelections(id);
+          }
           const openDialog=target.get().dialog;
           const keepDialog=(action==='draft-save'&&openDialog?.kind==='revise')||(action==='series-create'&&['schedule','revise'].includes(openDialog?.kind));
-          const next={dialog:keepDialog?openDialog:null,dialogError:null,notice:'actionSaved'};
+          const next={dialog:keepDialog?openDialog:null,dialogError:null,notice:action==='draft-delete'?'draftDeleted':'actionSaved'};
           if((action==='draft-regenerate'||action==='template-instantiate')&&body.result?.id)Object.assign(next,{page:'ticket',ticketId:body.result.id,nodeId:null});
           target.patch(next);
           await requestView(id,true);
           return body;
-        }catch(error){if(!disposed){target.patch({error:fleetErrorRecord(error),...(target.get().dialog?{dialogError:fleetErrorRecord(error)}:{})});if(['fleet/scope-required','fleet/stale-revision','fleet/dependency-wait'].includes(error.code))await requestView(id,true);}return null;}
+        }catch(error){
+          if(!disposed){
+            const detail=fleetErrorRecord(error);
+            const dialog=target.get().dialog;
+            target.patch({error:action==='draft-delete'&&dialog?null:detail,...(dialog?{dialogError:detail}:{})});
+            if(action==='draft-delete'||['fleet/scope-required','fleet/stale-revision','fleet/dependency-wait'].includes(error.code))await requestView(id,true);
+          }
+          return null;
+        }
         finally{view.busy=false;notifyViews();}
       }
       ctx.effect(()=>{
@@ -132,6 +144,18 @@ export function createFleetPlugin(require) {
       /* Session-tab surfaces share the Workspace data cache but keep their own ui state,
          so the chat tab and the fullscreen panel never navigate each other. */
       const tabScopes=new Map(),tabMounts=new Set(),paneScopes=new Map();
+      function reconcileTicketSelections(id){
+        const view=viewFor(id);
+        const reconcile=(scope,allowIncompatible)=>{
+          const ui=scope.ui;
+          if(ui.page!=='ticket')return;
+          const selected=view.data.tickets.find(ticket=>ticket.id===ui.ticketId);
+          if(selected&&(allowIncompatible||!isIncompatibleDraft(selected)))return;
+          scope.ui={...ui,page:'tickets',ticketId:null,nodeId:null,gateId:null,attemptId:null,dialog:null,dialogError:null};
+        };
+        reconcile(view,false);
+        for(const scope of tabScopes.values())if(scope.workspaceId===id)reconcile(scope,true);
+      }
       function tabScope(sessionId,workspaceId){
         let scope=tabScopes.get(sessionId);
         if(!scope||scope.workspaceId!==workspaceId){scope={workspaceId,ui:{page:'overview',query:'',filter:'all',initialized:false}};tabScopes.set(sessionId,scope);}
@@ -198,7 +222,7 @@ export function createFleetPlugin(require) {
           if(!Array.isArray(body.projects))throw fleetResponseError('invalidWorkspaceResponse');
           const series=body.projects.flatMap(project=>(Array.isArray(project.series)?project.series:[]).map(item=>({...item,workspaceId:project.workspaceId,projectTitle:project.title||project.path?.split(/[\\/]/).filter(Boolean).pop()||project.workspaceId})));
           if(disposed)return;
-          overview={ready:true,pending:false,error:null,projects:body.projects,series,scheduleStatus:body.scheduleStatus??null};
+          overview={ready:true,pending:false,error:null,pluginVersion:body.pluginVersion,projects:body.projects,series,scheduleStatus:body.scheduleStatus??null};
         }catch(error){if(disposed)return;overview={...overview,pending:false,error:error?.message||String(error)};}
         notifyViews();
       }
@@ -228,7 +252,7 @@ export function createFleetPlugin(require) {
         const toggleWorkspace=async(wsId,enabled)=>{await requestModes({workspaceId:wsId,enabled});void requestOverview();};
         const actSeries=async(action,args,item)=>{if(!canManage(item.workspaceId))return null;const result=await act(item.workspaceId,action,args,t);void requestOverview();return result;};
         const openSeries=(dialog,item)=>{if(!canManage(item.workspaceId))return;selectWorkspace(item.workspaceId);setUI(item.workspaceId,{page:'schedules',scheduleId:item.id,error:null,notice:null,dialog,dialogError:null});};
-        return h('section',{className:'dsh-fleet-shell dsh-fleet-control','data-fleet-control':'',lang:locale.language==='zh'?'zh-CN':'en','aria-labelledby':'fleet-control-title'},h('style',null,fleetStyles),views.renderRootOverview({t,...locale,workspaces,ui:overviewUi,setUI:setOverviewUI,setLanguagePreference:languageStore.setPreference,projects:overview.projects,series:overview.series,scheduleStatus:overview.scheduleStatus,pending:overview.pending||state.pending,error:overview.error||localizeError(mode,t).error,notice:state.notice?t('saved'):null,mode:localizeError(mode,t),refresh:()=>{void requestModes();void requestOverview();},openTicket,openWorkspace:selectWorkspace,toggleWorkspace,actSeries,openSeries,returnToConversation:()=>ctx.layout.selectPanel(null)}));
+        return h('section',{className:'dsh-fleet-shell dsh-fleet-control','data-fleet-control':'',lang:locale.language==='zh'?'zh-CN':'en','aria-labelledby':'fleet-control-title'},h('style',null,fleetStyles),views.renderRootOverview({t,...locale,workspaces,ui:overviewUi,setUI:setOverviewUI,setLanguagePreference:languageStore.setPreference,pluginVersion:overview.pluginVersion,projects:overview.projects,series:overview.series,scheduleStatus:overview.scheduleStatus,pending:overview.pending||state.pending,error:overview.error||localizeError(mode,t).error,notice:state.notice?t('saved'):null,mode:localizeError(mode,t),refresh:()=>{void requestModes();void requestOverview();},openTicket,openWorkspace:selectWorkspace,toggleWorkspace,actSeries,openSeries,returnToConversation:()=>ctx.layout.selectPanel(null)}));
       }
       function FleetPanel({useFleetLanguage,useFleetWorkspace,useFleetModes,useFleetViews,useFleetWorkspaces,useFleetSessions}) {
         const locale=useFleetLanguage(value=>value),t=fleetTranslator(locale.language);
@@ -276,7 +300,7 @@ export function createFleetPlugin(require) {
           const shell=children=>h('section',{className:'dsh-fleet-shell','data-fleet-draft-artifact':'','data-fleet-surface':'side-pane',lang:locale.language==='zh'?'zh-CN':'en'},h('style',null,fleetStyles),...children);
           if(!valid)return shell([h('p',{role:'alert'},locale.language==='zh'?'此草稿不属于当前对话或工作区未启用。':'This draft does not belong to this conversation or its workspace is disabled.')]);
           const view=viewFor(scope.workspaceId),ui=pane.ui,row=draftClient.record({...scope,draftId:ui.ticketId});
-          if(view.data.ready&&!view.data.tickets.some(ticket=>ticket.id===ui.ticketId&&ticket.originSessionId===sessionId))return shell([h('p',{role:'alert'},t('unavailable'))]);
+          if(view.data.ready&&!view.data.tickets.some(ticket=>ticket.id===ui.ticketId&&ticket.originSessionId===sessionId))return shell([h('p',{role:'alert'},t('ticketUnavailable'))]);
           const setUIFn=patch=>{const {page,...rest}=patch;pane.ui={...pane.ui,...rest};notifyViews();};
           const sink={get:()=>pane.ui,patch:setUIFn};
           const navigateFn=(page,patch={})=>{

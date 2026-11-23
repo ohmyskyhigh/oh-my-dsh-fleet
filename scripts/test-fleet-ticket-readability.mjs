@@ -267,5 +267,5 @@ test('theme keeps monochrome scope and readability additions are scoped, unroote
     assert.ok(fleetStyles.includes(`.dsh-fleet-shell .${cls}`), cls);
   }
   assert.ok(/\.fl-grow \{[^}]*height:44px/.test(fleetStyles), 'normal data rows stay 44px');
-  assert.ok(/\.fl-grow-notice \{height:auto;min-height:44px/.test(fleetStyles), 'notice rows adapt');
+  assert.ok(/\.fl-grow-with-actions > \.fl-grow \{[^}]*height:44px/.test(fleetStyles), 'grouped rows share the same height');
 });

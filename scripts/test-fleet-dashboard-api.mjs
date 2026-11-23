@@ -6,7 +6,7 @@ import os from 'node:os';
 import { registerHooks } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { FleetService } from '../src/fleet-service.js';
-import { FleetStore } from '../src/fleet-store.js';
+import { FleetStore, ticketFilename } from '../src/fleet-store.js';
 import { normalizePlan, projectTicket } from '../src/fleet-model.js';
 import { registerFleetDashboardApi } from '../src/fleet-dashboard-api.js';
 
@@ -115,6 +115,65 @@ async function fixture(t) {
   const projected = async (ws, id) => projectTicket(await service.read(ws, id));
   return { ...h, temp, rootPath, locations, service, host, calls, hooks, wrapped, request, action, seed, templates, projected, dispose, disposers };
 }
+test('draft-delete validates scope and revision and commits removal across dashboard reads and reopen', async t => {
+  const f = await fixture(t), target = await f.seed(), other = await f.seed('beta');
+  const args = { ticketId: target.id, expectedRevision: target.revision };
+  const remove = (fields = args, ws = 'alpha') => f.action('draft-delete', fields, ws);
+  error(await remove({ticketId: target.id}), 400, 'invalid-request');
+  error(await remove({...args, expectedRevision: 0}), 400, 'invalid-request');
+  error(await remove({...args, sessionId: 'injected'}), 400, 'invalid-request');
+  const foreign = await f.seed('alpha', 'foreign-only');
+  error(await remove({ticketId: foreign.id, expectedRevision: 1}, 'beta'), 404, 'unknown-ticket');
+  const dependent = await f.service.saveDraftTicket('alpha', {plan: {goal:'Dependent', ticketDependencies:[target.id]}});
+  const another = await f.service.saveDraftTicket('alpha', {plan: {goal:'A different goal', title:'Named Ticket', ticketDependencies:[target.id]}});
+  const blocked = await remove();
+  error(blocked, 409, 'ticket-referenced');
+  assert.deepEqual(blocked.body.error.references, [
+    {kind:'ticket', id:dependent.id, title:'Dependent'}, {kind:'ticket', id:another.id, title:'Named Ticket'}
+  ]);
+  assert(f.service.health.ready);
+  for (const ticket of [dependent, another]) ok(await remove({ticketId:ticket.id, expectedRevision:ticket.revision}));
+  const abandoned = ok(await f.action('abandon', args)).result;
+  error(await remove(), 409, 'stale-revision');
+  const dir = path.join(f.locations.alpha, '.fleet');
+  const pointer = async () => JSON.parse(await fs.readFile(path.join(dir, 'current.json'), 'utf8')).revision;
+  const priorGeneration = await pointer();
+  assert.deepEqual(ok(await remove({...args, expectedRevision: abandoned.revision})), {
+    schemaVersion: 1, workspaceId: 'alpha', action: 'draft-delete', result: {deletedTicketId: target.id}
+  });
+  error(await remove(), 404, 'unknown-ticket');
+  const legacy = await f.service.saveDraftTicket('alpha', {plan: {goal:'Replaced draft'}});
+  const replaced = await f.service.human('alpha', 'test', 'regenerateTicket', [legacy.id, legacy.revision, {goal:'Replacement draft'}]);
+  const predecessor = await f.projected('alpha', legacy.id);
+  assert.equal(predecessor.supersededBy, replaced.id);
+  assert.deepEqual(ok(await remove({ticketId:replaced.id, expectedRevision:replaced.revision})).result, {deletedTicketId: replaced.id});
+  error(await f.request(`/api/fleet/view?workspaceId=alpha&ticketId=${replaced.id}`), 404, 'unknown-ticket');
+  const released = await f.projected('alpha', legacy.id);
+  assert.equal(released.supersededBy, undefined);
+  assert.equal(released.replacementDeleted.ticketId, replaced.id);
+  assert.equal(released.activity.at(-1).type, 'replacement-deleted');
+  assert.equal(released.status, 'superseded');
+  error(await remove({ticketId:legacy.id, expectedRevision:released.revision}), 409, 'control-locked');
+  error(await f.request('/api/fleet/view?workspaceId=alpha&ticketId=ticket'), 404, 'unknown-ticket');
+  error(await f.request('/api/fleet/drafts?workspaceId=alpha&draftId=ticket'), 404, 'unknown-draft');
+  assert.deepEqual(ok(await f.request('/api/fleet/view?workspaceId=alpha')).tickets.map(x => x.id), [foreign.id, legacy.id]);
+  const project = ok(await f.request('/api/fleet/overview')).projects.find(p => p.workspaceId === 'alpha');
+  assert.deepEqual(project.tickets.map(row => row.id), [foreign.id, legacy.id]);
+  assert.deepEqual(await f.service.read('beta', other.id), other);
+  const persisted = await FleetStore.read({dir, kind: 'workspace'});
+  const ticketBody = generation => path.join(dir, 'generations', generation, 'tickets', ticketFilename(target.id));
+  await assert.rejects(fs.stat(ticketBody(await pointer())), {code:'ENOENT'});
+  assert.deepEqual(JSON.parse(await fs.readFile(ticketBody(priorGeneration), 'utf8')), abandoned);
+  assert.deepEqual(persisted.tickets.map(t => t.id), [foreign.id, legacy.id]);
+  assert.equal(persisted.tickets.at(-1).supersededBy, undefined);
+  assert.equal(persisted.tickets.at(-1).replacementDeleted.ticketId, replaced.id);
+  const reopened = await FleetService.open({rootPath:f.rootPath, workspacePaths:{alpha:f.locations.alpha}, adapter:f.host.adapter, autoStart:false});
+  try {
+    assert.deepEqual((await reopened.listDraftTickets('alpha')).map(t => t.id), [foreign.id]);
+    assert.equal((await reopened.read('alpha', legacy.id)).replacementDeleted.ticketId, replaced.id);
+  } finally { await reopened.close(); }
+  assert.deepEqual(f.host.calls, []);
+});
 test('dashboard instantiates an originless draft, saves it, manages a series and shows its source', async t => {
   const f = await fixture(t);
   await f.templates(); await f.service.registerWorkspace('alpha', f.locations.alpha);

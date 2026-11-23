@@ -885,9 +885,21 @@ export function createFleetViews(React) {
         h('option',{value:'auto'},L('跟随 DSH','Follow DSH')),h('option',{value:'zh'},'中文'),h('option',{value:'en'},'English')));
   }
 
-  function Modal({title,children,onClose,busy,L,inPane=false}) {
+  function Modal({title,children,onClose,busy,L,inPane=false,restoreListFocus=false}) {
     const ref = React.useRef(null);
-    React.useEffect(()=>{const element=ref.current;const previousFocus=element.ownerDocument.activeElement;if(inPane)element.show();else element.showModal();return()=>{element.close();if(previousFocus?.isConnected)previousFocus.focus();};},[]);
+    React.useEffect(()=>{
+      const element=ref.current,doc=element.ownerDocument;
+      const previousFocus=doc.activeElement;
+      const surface=restoreListFocus?element.closest('.fl-content'):null;
+      if(inPane)element.show();else element.showModal();
+      return()=>{
+        element.close();
+        if(previousFocus?.isConnected){previousFocus.focus();return;}
+        if(!surface?.isConnected||doc.activeElement!==doc.body)return;
+        const fallback=surface.querySelector('.fl-search')||surface.querySelector('[data-fleet-grouped-list] [data-fleet-draft-menu], [data-fleet-grouped-list] [data-open-ticket]')||surface.querySelector('[data-fleet-tab="tickets"]');
+        fallback?.focus();
+      };
+    },[]);
     return h('dialog',{ref,className:inPane?'fl-dialog fl-pane-editor':'fl-dialog','aria-labelledby':'fleet-dialog-title',onKeyDown:inPane?event=>{if(event.key==='Escape'&&!busy&&!ref.current?.querySelector('.fl-popout'))onClose();}:undefined,onCancel:event=>{event.preventDefault();if(!busy)onClose();}},
       h('div',{className:'fl-dialog-head'},h('h2',{id:'fleet-dialog-title'},title),button('×',onClose,{'aria-label':L('关闭','Close'),disabled:busy,className:'fl-btn fl-btn-ghost'})),children);
   }
@@ -912,43 +924,25 @@ export function createFleetViews(React) {
       return h('span',{key:id,className:'fl-avatar','data-tone':tone,title:label},Array.from(label)[0]);
     }));
   }
-  function ticketStage(ticket,group,L) {
-    const nodes = list(ticket.nodes);
-    if (group==='waiting') {
-      if(waitingUpstream(ticket))return L('等待上游交付','Awaiting upstream delivery');
-      const gate = waiting(ticket)[0];
-      return gate.reviewer?.kind==='agent' ? L('等待智能体审核','Waiting for Agent review') : L('等待人工审批','Waiting for approval');
-    }
-    if (group==='attention') {
-      const node = nodes.find(node=>['failed','interrupted'].includes(node.status));
-      return node ? `${L(...names[node.status])} · ${node.role||node.id}` : L('审核已退回','Review returned');
-    }
-    if (group==='running') {
-      const node = nodes.find(node=>node.status==='running');
-      if (node) return `${L('执行中','Running')} · ${node.role||node.id}`;
-      if (nodes.some(node=>node.status==='pending')) return L('等待节点启动','Waiting for a node to start');
-    }
-    return names[ticket.status] ? L(...names[ticket.status]) : groupLabel(group,L);
-  }
   function groupedTickets(tickets,o) {
     const {L,navigate}=o;
     const groups=GROUP_ORDER.map(k=>({k,items:tickets.filter(t=>groupOf(t)===k)})).filter(g=>g.items.length);
     if(!groups.length)return empty(o.ui?.query?L('没有匹配的任务','No matching Tickets'):L('这个工作区还没有任务','No Tickets in this workspace'));
     return h('div',{className:'fl-glist','data-fleet-grouped-list':''},...groups.map(g=>h(React.Fragment,{key:g.k},
       h('div',{className:'fl-ghead'},h('span',{className:'fl-dot',style:{color:toneColor(g.k)}}),groupLabel(g.k,L),h('span',{className:'fl-count'},g.items.length)),
-      ...g.items.map(t=>isIncompatibleDraft(t)?h('div',{key:t.id,className:'fl-grow fl-grow-notice','data-fleet-ticket':t.id,'data-fleet-incompatible-title':t.id},
-        h('span',{className:'fl-st',style:{color:toneColor(g.k)}},h('span',{className:'fl-dot'}),groupLabel(g.k,L)),
-        h('span',{className:'fl-id'},t.id),
-        h('span',{className:'fl-ttl'},h('strong',null,ticketTitle(t)),h('small',{className:'fl-help'},recreateHelp(L).props.children)),
-        h('div',{className:'fl-row fl-grow-actions'},incompatibleBadge(t,L),button(L('查看旧草稿','Preview'),()=>o.openDialog({kind:'preview',ticketId:t.id}),{'data-fleet-incompatible-preview':t.id,className:'fl-btn fl-btn-ghost'}),recreateDraftButton(t,o)),
-        h('span',{className:'fl-small fl-muted fl-upd'},timestamp(t.updatedAt,L)))
-      :h('button',{key:t.id,type:'button',className:'fl-grow','data-fleet-ticket':t.id,'data-open-ticket':t.id,onClick:()=>navigate('ticket',{ticketId:t.id,nodeId:null})},
-        h('span',{className:'fl-st',style:{color:toneColor(g.k)}},h('span',{className:'fl-dot'}),groupLabel(g.k,L)),
-        h('span',{className:'fl-id'},t.id),
-        h('span',{className:'fl-ttl'},h('strong',null,ticketTitle(t))),
-        h('span',{className:'fl-stage'},h('span',{className:'fl-stage-label'},ticketStage(t,g.k,L)),pips(t.nodes)),
-        avstack(t.nodes,t.snapshot?.agents||t.plan?.agents),
-        h('span',{className:'fl-small fl-muted fl-upd'},timestamp(t.updatedAt||list(t.events).at(-1)?.time,L)))))));
+      ...g.items.map(t=>{
+        const incompatible=isIncompatibleDraft(t);
+        const actions=incompatible||canDeleteDraft(t)?draftActions(t,o,incompatible):null;
+        const title=ticketTitle(t);
+        const content=[h('span',{className:'fl-ttl',title},h('strong',null,title)),
+          incompatible&&incompatibleBadge(t,L),
+          h('span',{className:'fl-small fl-muted fl-upd'},timestamp(t.updatedAt||list(t.events).at(-1)?.time,L))];
+        const main=incompatible
+          ? h('div',{className:'fl-grow fl-grow-notice'},...content)
+          : h('button',{type:'button',className:'fl-grow','data-open-ticket':t.id,onClick:()=>navigate('ticket',{ticketId:t.id,nodeId:null})},...content);
+        return h('div',{key:t.id,className:'fl-grow-with-actions','data-fleet-ticket':t.id,...(incompatible?{'data-fleet-incompatible-title':t.id}:{})},
+          main,h('div',{className:'fl-grow-actions'},actions));
+      }))));
   }
   function ticketBoard(tickets,o) {
     const {L,navigate}=o;
@@ -960,7 +954,29 @@ export function createFleetViews(React) {
           h('h3',null,ticketTitle(t)),h('div',{className:'fl-row fl-between'},avstack(t.nodes,t.snapshot?.agents||t.plan?.agents),pips(t.nodes)))));
     }));
   }
+  const canDeleteDraft=ticket=>ticket?.status==='draft'&&!ticket.execution;
   const ticketTitle=ticket=>[ticket.title,ticket.plan?.title,readableTitle(ticket.goal??ticket.plan?.goal),readableTitle(ticket.plan?.ticket?.goal)].find(value=>typeof value==='string'&&value.trim())||ticket.id;
+  function draftActions(ticket,o,incompatible) {
+    const {L,busy,openDialog}=o;
+    const title=ticketTitle(ticket);
+    const choose=action=>event=>{
+      const menu=event?.currentTarget.closest('details');
+      if(menu){menu.open=false;menu.querySelector('summary')?.focus();}
+      return action();
+    };
+    const item=(label,action,props)=>button(label,choose(()=>{if(!props.disabled)return action();}),{className:'fl-btn fl-btn-ghost',...props});
+    return h('details',{className:'fl-draft-menu',onBlur:event=>{
+      if(!event.currentTarget.contains(event.relatedTarget))event.currentTarget.open=false;
+    },onKeyDown:event=>{
+      const menu=event.currentTarget;
+      if(event.key==='Escape'&&menu.open){event.stopPropagation();menu.open=false;menu.querySelector('summary')?.focus();}
+    }},
+      h('summary',{'data-fleet-draft-menu':ticket.id,className:'fl-btn fl-btn-ghost','aria-label':L(`草稿「${title}」的操作`,`Actions for draft “${title}”`)},L('操作','Actions')),
+      h('div',{className:'fl-draft-options'},
+        incompatible&&item(L('查看旧草稿','Preview old draft'),()=>openDialog({kind:'preview',ticketId:ticket.id}),{'data-fleet-incompatible-preview':ticket.id}),
+        incompatible&&item(L('在新对话中重新生成','Recreate in new chat'),()=>o.recreateDraft(ticket),{'data-fleet-recreate-draft':ticket.id,disabled:!!(o.creatingTicket||busy)||typeof o.recreateDraft!=='function'}),
+        canDeleteDraft(ticket)&&item(L('删除草稿','Delete draft'),()=>openDialog({kind:'draft-delete',ticketId:ticket.id,expectedRevision:ticket.revision,title}),{'data-fleet-draft-delete':ticket.id,className:'fl-btn fl-btn-ghost fl-btn-danger',disabled:busy})));
+  }
   const incompatibleBadge=(ticket,L)=>h('span',{className:'fl-badge','data-tone':'waiting','data-fleet-incompatible-draft':ticket.id},L('不兼容','Incompatible'));
   const recreateHelp=L=>h('p',{className:'fl-help'},L('新对话会携带原始需求。发送预填请求后生成兼容草稿，原草稿保留。','The new chat carries the original needs. Send the prefilled request to generate a compatible draft; the original draft is preserved.'));
   function recreateDraftButton(ticket,o) {
@@ -1091,12 +1107,12 @@ export function createFleetViews(React) {
           h('section',null,h('h2',null,L('最近活动','Recent activity')),events.length?events.map(({ticket,event})=>h('article',{className:'fl-timeline',key:event.id},
             h('span',{className:'fl-dot',style:{color:toneColor(activityGroups[event.type])}}),
             h('div',null,h('p',{className:'fl-activity-action',title:event.type},L(...(Object.hasOwn(activityLabels,event.type)?activityLabels[event.type]:['任务已更新','Ticket updated']))),
-              h('div',{className:'fl-activity-meta'},ticketLink(ticket,o),' · ',timestamp(event.time,L))))):empty(L('活动会显示在这里','Activity will appear here'))))));
+              h('div',{className:'fl-activity-meta'},isIncompatibleDraft(ticket)?ticketTitle(ticket):ticketLink(ticket,o),' · ',timestamp(event.time,L))))):empty(L('活动会显示在这里','Activity will appear here'))))));
   }
   function ticketsView(o) {
     const {L,ui,data,setUI}=o;
     const query=(ui.query||'').toLowerCase();
-    const tickets=list(data.tickets).filter(ticket=>(ui.filter==='all'||!ui.filter||ticket.status===ui.filter)&&`${ticket.id} ${ticket.goal}`.toLowerCase().includes(query));
+    const tickets=list(data.tickets).filter(ticket=>(ui.filter==='all'||!ui.filter||ticket.status===ui.filter)&&`${ticket.id} ${ticketTitle(ticket)} ${ticket.goal}`.toLowerCase().includes(query));
     const board=(ui.ticketsLayout||'list')==='board';
     return h('div',{className:'fl-stack'},h('div',{className:'fl-toolbar'},
       h('input',{className:'fl-search',type:'search',value:ui.query||'',placeholder:L('搜索任务名称或 ID…','Search Tickets…'),'aria-label':L('搜索任务','Search Tickets'),onChange:e=>setUI({query:e.target.value})}),
@@ -1684,6 +1700,18 @@ export function createFleetViews(React) {
     const field=(label,name,value='',props={})=>h('label',{className:'fl-field',key:name},label,h(props.multiline?'textarea':'input',{name,defaultValue:value,...props,multiline:undefined}));
     const title=d.kind==='review'?(d.decision==='passed'?L('审核通过','Pass review'):L('退回审核','Return review')):({revise:L('修改任务草稿','Edit draft'),start:L('确认执行计划','Confirm execution plan'),retry:L('重试节点','Retry node'),change:L('修改当前节点任务','Change this node task'),pass:L('人工通过审核','Pass review as human'),'deliver-override':L('人工交付覆盖','Human delivery override'),abandon:L('放弃执行此 Ticket','Abandon this Ticket'),deliverable:L('交付物详情','Deliverable details'),preview:L('旧草稿预览','Legacy draft preview'),'root-agent':L('编辑共享智能体','Edit Root Agent'),'root-flow':L('编辑共享编排','Edit Root orchestration'),schedule:L('安排执行','Schedule runs'),instantiate:L('从模板新建 Ticket','New Ticket from template'),'series-config':L('编辑系列配置','Edit series configuration'),'series-delete':L('删除计划','Delete schedule')})[d.kind];
     const ticket=list(data.tickets).find(t=>t.id===d.ticketId);
+    if(d.kind==='draft-delete'){
+      const changed=!canDeleteDraft(ticket)||ticket.revision!==d.expectedRevision;
+      const confirm=async event=>{
+        event.preventDefault();
+        if(!busy&&!changed)await act('draft-delete',{ticketId:d.ticketId,expectedRevision:d.expectedRevision});
+      };
+      return h(Modal,{title:L('删除草稿','Delete draft'),onClose:close,busy,L,restoreListFocus:true},h('form',{onSubmit:confirm},h('div',{className:'fl-stack'},
+        h('p',{className:'fl-pre-wrap'},L(`要永久删除草稿「${d.title}」吗？`,`Permanently delete the draft “${d.title}”?`)),
+        ui.dialogError&&h('p',{role:'alert',className:'fl-notice'},ui.dialogError),
+        changed&&h('p',{role:'status',className:'fl-notice'},L('此草稿已更改或已不可用。请关闭此窗口并查看任务列表。','This draft changed or is no longer available. Close this dialog and check the Tickets list.')),
+        h('div',{className:'fl-dialog-actions'},button(L('取消','Cancel'),close,{disabled:busy,'data-fleet-draft-delete-cancel':''}),button(busy?L('正在删除…','Deleting…'):L('确认删除','Confirm delete'),undefined,{type:'submit',className:'fl-btn fl-btn-danger',disabled:busy||changed,'data-fleet-draft-delete-confirm':''})))));
+    }
     if(d.kind!=='abandon'&&isIncompatibleDraft(ticket||d.ticket))return h(Modal,{title:L('不兼容草稿','Incompatible draft'),onClose:close,busy,L},incompatibleDraftNotice(ticket||d.ticket,o));
     if(d.kind==='revise')return h(Modal,{inPane:o.surface==='side-pane',title:['draft','stopped'].includes(ticket?.status)?title:L('任务计划','Ticket plan'),onClose:close,busy,L},renderDraftEditor({...o,draft:ticket||d.ticket,error:ui.dialogError,onSave:async(plan,base,options)=>{const body=await act('draft-save',{ticketId:base.id,expectedRevision:base.revision,sessionId:base.originSessionId,plan,...(options||{})});const result=body?.result;return result?.ticket??result;},onStart:async()=>{await act('start',{ticketId:(ticket||d.ticket).id});},onSchedule:async args=>(await act('series-create',{sourceTicketId:(ticket||d.ticket).id,...args}))?.result??null,onOpenSeries:seriesId=>{close();o.navigate('schedules',{scheduleId:seriesId});},onReload:o.refresh,onDirtyChange:o.onDraftDirtyChange}));
     if(d.kind==='schedule'){
@@ -2239,6 +2267,7 @@ export function createFleetViews(React) {
       (typeof goal!=='string'||!goal.trim())&&h('p',{className:'fl-help'},hasOrigin?L('原始记录没有可恢复的任务目标。请回到原始对话提供目标后再恢复。','The original record has no recoverable goal. Provide the goal in the original conversation before recovery.'):L('原始记录没有可恢复的任务目标。请在该工作区的对话中提供明确目标后再恢复。','The original record has no recoverable goal. Provide an explicit goal in a conversation in this Workspace before recovery.')),
       canRecover&&hasOrigin&&row(o.onRepair&&button(L('尝试无损修复','Try lossless repair'),()=>o.onRepair(ticket),{disabled:o.busy}),ticket.status==='draft'&&o.onRegenerate&&button(L('重新生成新任务','Regenerate as new Ticket'),()=>o.onRegenerate(ticket),{disabled:o.busy})),
       canRecover&&!hasOrigin&&h('p',{className:'fl-help','data-fleet-legacy-session-help':''},L('此历史任务没有关联的来源对话。请在该工作区的对话中使用 ','This historical Ticket has no linked source conversation. In a conversation in this Workspace, use '),h('code',null,recoveryCommand),ticket.status==='draft'?L(' 创建替代草稿。',' to create a replacement draft.'):L(' 明确修复此任务。',' to explicitly repair this Ticket.')),
+      ticket.replacementDeleted&&h('p',{className:'fl-help','data-fleet-replacement-deleted':ticket.id},L('替代草稿已删除','Replacement draft was deleted')),
       ticket.supersededBy&&o.onOpenTicket&&(replacement?ticketLink(replacement,o,{label:L('打开替代任务','Open replacement Ticket'),onOpen:()=>o.onOpenTicket(replacement.id),className:'fl-btn'}):button(L('打开替代任务','Open replacement Ticket'),()=>o.onOpenTicket(ticket.supersededBy))),
       h('p',{className:'fl-help fl-spaced'},L('修复会保留原始记录；重新生成仅在新任务保存成功后替代此草稿。','Repair retains the original record; regeneration replaces this draft only after the new Ticket is saved.')));
   }
@@ -2334,7 +2363,7 @@ export function createFleetViews(React) {
     const current = [...tabs,settingsTab].find(([key]) => key === tab);
     const navButton = ([key,label]) => button(label,() => setTab(key),{key,className:'fl-btn fl-btn-ghost','data-fleet-root-tab':key,'aria-current':tab === key ? 'page' : undefined});
     return h('div',{className:'fl-content'},
-      h('div',{className:'fl-crumb'},h('strong',null,'oh-my-dsh-fleet'),
+      h('div',{className:'fl-crumb'},h('div',{className:'fl-row'},h('strong',null,'oh-my-dsh-fleet'),o.pluginVersion&&badge(`v${o.pluginVersion}`)),
         h('div',{className:'fl-row fl-crumb-actions'},languageSelect(o),button(L('返回会话','Back to chat'),o.returnToConversation,{className:'fl-btn fl-btn-ghost'}))),
       h('nav',{className:'fl-overview-nav','aria-label':L('Fleet 总览导航','Fleet overview navigation')},
         h('div',{className:'fl-overview-nav-group'},...tabs.map(navButton)),navButton(settingsTab)),

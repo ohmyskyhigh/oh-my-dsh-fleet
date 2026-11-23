@@ -14,13 +14,13 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 
 | 插件 | DeepSeek Harness | 确认版本 |
 | --- | --- | --- |
-| `oh-my-dsh-fleet@0.12.0` | **`0.2.2-rc.5`** | CLI 执行 `dsh --version`。桌面端使用应用自带的 Harness。 |
+| `oh-my-dsh-fleet@0.12.5` | **`0.2.2-rc.5`** | CLI 执行 `dsh --version`。桌面端使用应用自带的 Harness。 |
 
 | 安装渠道 | 桌面端「插件 → 添加插件」 | CLI（将 `web` 换成你的 Profile） |
 | --- | --- | --- |
-| **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.12.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.12.0/oh-my-dsh-fleet-0.12.0.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scripts` |
+| **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.12.5.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.12.5/oh-my-dsh-fleet-0.12.5.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.5.tgz" --ignore-scripts` |
 | **GitHub 仓库** | 粘贴 `https://github.com/ohmyskyhigh/oh-my-dsh-fleet`，从默认分支安装。 | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.12.0)** | 输入 `oh-my-dsh-fleet@0.12.0`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.12.0` |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.12.5)** | 输入 `oh-my-dsh-fleet@0.12.5`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.12.5` |
 
 安装后启用插件，按提示重启桌面应用或 CLI Profile。在侧栏打开 **oh-my-dsh-fleet**，为目标 Workspace 开启 Fleet，然后在该 Workspace 的对话中发送 `/fleet help`。
 
@@ -30,7 +30,7 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 
 ```sh
 dsh plugin --profile web remove @dsh-fleet/shell
-dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scripts
+dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.5.tgz" --ignore-scripts
 ```
 
 使用原来的 Workspace 文件夹与 Fleet 数据位置。已有 Ticket、模板、计划和 `/fleet` 命令继续使用。 [旧版 0.9.8 下载](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8)
@@ -73,6 +73,12 @@ dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scri
 
 ## 跑第一张 Ticket
 
+### 草稿
+
+工作区概览和**任务**列表里的每条草稿占一行：标题、不兼容标记（保存的计划格式不受支持时）、更新时间和**操作 ▾**。菜单里放着旧草稿的预览与重新生成，以及未执行草稿的**删除草稿**。删除会先确认草稿名称；被其他任务依赖或被排期引用时会保留草稿并列出引用方。如果唯一的关联只是被这份草稿替代的旧任务，则允许删除，旧任务记录保留并标注「替代草稿已删除」。
+
+Fleet 总览和工作区概览的标题旁都会显示插件版本号。
+
 在已启用 Fleet 的 Workspace 对话中发送：
 
 ```text
@@ -109,7 +115,7 @@ pnpm test
 pnpm pack
 ```
 
-可选浏览器检查先执行 `pnpm exec playwright-core install chromium`，再执行 `pnpm test:browser`。也可用 `FLEET_TEST_BROWSER` 指定已有 Chromium。
+可选浏览器检查先执行 `pnpm exec playwright-core install chromium`，再执行 `pnpm test:browser`。也可用 `FLEET_TEST_BROWSER` 指定已有 Chromium。`scripts/review-fleet-ui.mjs` 默认使用已安装的 Microsoft Edge，可用 `--edge <路径>` 指向其他 Chromium 浏览器。
 
 ## 许可证
 

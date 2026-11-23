@@ -62,6 +62,7 @@ function actionInput(body) {
     'series-update':['seriesId','fields','expectedRevision'],
     'series-follow':['sourceTicketId','triggerSeriesId','expectedRevision','name'],
     'series-pause':['seriesId'], 'series-resume':['seriesId'], 'series-delete':['seriesId'],
+    'draft-delete': ['ticketId', 'expectedRevision'],
     'draft-repair': ['sessionId', 'ticketId', 'expectedRevision', 'plan'],
     'draft-regenerate': ['sessionId', 'ticketId', 'expectedRevision', 'plan'],
     start: ['ticketId'], stop: ['ticketId'], resume: ['ticketId'],
@@ -101,7 +102,7 @@ function actionInput(body) {
       text(body.name, 'name');
       if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) invalid('Expected a positive source Ticket revision.');
       break;
-    case 'dependency-enable': case 'dependency-disable':
+    case 'draft-delete': case 'dependency-enable': case 'dependency-disable':
       if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) invalid('Expected a positive Ticket revision.');
       break;
     case 'series-update':
@@ -170,7 +171,7 @@ function errorResponse(error) {
       : error.code.startsWith('unknown-') ? 404
         : ['closed', 'persistence-fault'].includes(error.code) ? 503 : 409;
   }
-  return reply({ schemaVersion: 1, error: { code, message: error instanceof Error ? error.message : String(error), ...(Array.isArray(error.diagnostics) ? { diagnostics: error.diagnostics } : {}) } }, status);
+  return reply({ schemaVersion: 1, error: { code, message: error instanceof Error ? error.message : String(error), ...(Array.isArray(error.diagnostics) ? { diagnostics: error.diagnostics } : {}), ...(code === 'fleet/ticket-referenced' ? { references: error.references } : {}) } }, status);
 }
 
 /** Authenticated owner UI only: the Host connection registry owns authentication.
@@ -324,6 +325,7 @@ export function registerFleetDashboardApi(ctx, { getService }) {
       const reviewEvidence = body.artifactRefs === undefined ? body.evidence : { ...(body.evidence !== null && typeof body.evidence === 'object' && !Array.isArray(body.evidence) ? body.evidence : { text: body.evidence }), artifactRefs: body.artifactRefs };
       const actions = {
         start: ['start', [body.ticketId]], stop: ['stop', [body.ticketId]], resume: ['resume', [body.ticketId]],
+        'draft-delete': ['deleteDraftTicket', [body.ticketId, body.expectedRevision]],
         'dependency-enable': ['enableDependencies', [body.ticketId, body.expectedRevision]],
         'dependency-disable': ['disableDependencies', [body.ticketId, body.expectedRevision]],
         retry: ['retryNode', [body.ticketId, body.nodeId, body.reason]],

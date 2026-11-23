@@ -308,9 +308,7 @@ export const fleetStyles = `
 .dsh-fleet-shell .fl-file-purpose {color:var(--fl-fg);overflow-wrap:anywhere}
 .dsh-fleet-shell .fl-file-path {color:var(--fl-muted);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:ltr}
 .dsh-fleet-shell .fl-pre-wrap {white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
-.dsh-fleet-shell .fl-grow-notice {height:auto;min-height:44px;padding:10px 16px;align-items:start;row-gap:4px;cursor:default}
-.dsh-fleet-shell .fl-grow-notice .fl-ttl small {display:block;margin-top:3px;white-space:normal;overflow:visible}
-.dsh-fleet-shell details summary {cursor:pointer;user-select:none}@container fleet (max-width:600px) {.dsh-fleet-shell .fl-file {grid-template-columns:minmax(0,1fr) auto}.dsh-fleet-shell .fl-file-purpose {grid-column:1/-1}.dsh-fleet-shell .fl-grow-notice .fl-id,.dsh-fleet-shell .fl-grow-notice .fl-upd {display:none}}
+.dsh-fleet-shell details summary {cursor:pointer;user-select:none}@container fleet (max-width:600px) {.dsh-fleet-shell .fl-file {grid-template-columns:minmax(0,1fr) auto}.dsh-fleet-shell .fl-file-purpose {grid-column:1/-1}}
 /* P4 shared-definition lists (redesign §5): dense rows reuse the fl-grow language. Monochrome accents only. */
 .dsh-fleet-shell .fl-lrow {grid-template-columns:minmax(0,1.5fr) 140px 160px 80px 64px 130px}
 .dsh-fleet-shell .fl-lrow .fl-ttl {display:flex;align-items:center;gap:10px;min-width:0}
@@ -453,9 +451,19 @@ export const fleetStyles = `
 .dsh-fleet-shell .fl-stage-label {color:var(--fl-muted);font-size:11px;line-height:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-fleet-shell .fl-stage .fl-pips {overflow:hidden}
 .dsh-fleet-shell .fl-avstack .fl-avatar {color:var(--fl-tone,var(--fl-muted));background:color-mix(in srgb,currentColor 13%,var(--fl-bg));border-radius:6px}
-.dsh-fleet-shell .fl-grow-notice {grid-template-columns:110px 90px minmax(0,1fr) max-content 90px;align-items:center}
-.dsh-fleet-shell .fl-grow-actions {gap:6px}
-.dsh-fleet-shell .fl-grow-actions .fl-btn {min-height:30px;padding:3px 8px;font-size:12px;white-space:nowrap}
+.dsh-fleet-shell .fl-glist:has(.fl-grow-with-actions) {overflow:visible}
+.dsh-fleet-shell .fl-grow-with-actions {display:grid;grid-template-columns:minmax(0,1fr) 86px;align-items:center;border-bottom:1px solid var(--fl-border)}
+.dsh-fleet-shell .fl-grow-with-actions:last-child,.dsh-fleet-shell .fl-grow-with-actions .fl-grow {border-bottom:0}
+.dsh-fleet-shell .fl-grow-with-actions > .fl-grow {grid-template-columns:minmax(0,1fr) auto 108px;height:44px;gap:8px;padding:0 8px 0 16px}
+.dsh-fleet-shell .fl-grow-with-actions .fl-upd {grid-column:3;text-align:end}
+.dsh-fleet-shell .fl-grow-notice {cursor:default}
+.dsh-fleet-shell .fl-grow-actions {display:flex;justify-content:flex-end;padding-inline-end:8px}
+.dsh-fleet-shell .fl-draft-menu {position:relative}
+.dsh-fleet-shell .fl-draft-menu > summary::after {content:'▾';margin-inline-start:4px}
+.dsh-fleet-shell .fl-draft-menu[open] > summary::after {content:'▴'}
+.dsh-fleet-shell .fl-draft-options {position:absolute;z-index:3;inset-inline-end:0;top:100%;display:grid;min-width:max-content;padding:4px;border:1px solid var(--fl-border);border-radius:8px;background:var(--fl-bg);box-shadow:0 6px 16px #0003}
+.dsh-fleet-shell .fl-draft-menu .fl-btn {min-height:30px;padding:3px 8px;font-size:12px;white-space:nowrap}
+.dsh-fleet-shell .fl-draft-options .fl-btn {justify-content:flex-start}
 .dsh-fleet-shell .fl-attention {border-radius:8px;overflow-wrap:anywhere;margin-bottom:0}
 .dsh-fleet-shell .fl-attention+.fl-attention {margin-top:12px}
 .dsh-fleet-shell .fl-attention .fl-btn {margin-top:10px;min-height:30px;padding:3px 10px}
@@ -466,15 +474,13 @@ export const fleetStyles = `
 @container ticket-list (max-width:860px) {
   .dsh-fleet-shell .fl-grow {grid-template-columns:92px minmax(0,1.5fr) minmax(0,1fr) 76px;gap:8px}
   .dsh-fleet-shell .fl-grow .fl-id,.dsh-fleet-shell .fl-grow .fl-upd {display:none}
-  .dsh-fleet-shell .fl-grow-notice {grid-template-columns:92px minmax(0,1fr)}
-  .dsh-fleet-shell .fl-grow-actions {grid-column:2/-1}
+  .dsh-fleet-shell .fl-grow-with-actions > .fl-grow {grid-template-columns:minmax(0,1fr) auto}
 }
 @container ticket-list (max-width:560px) {
   .dsh-fleet-shell .fl-grow {grid-template-columns:auto minmax(0,1fr);height:auto;padding:8px 10px}
   .dsh-fleet-shell .fl-grow .fl-avstack {display:none}
   .dsh-fleet-shell .fl-stage {grid-column:2}
-  .dsh-fleet-shell .fl-grow-actions {grid-column:1/-1}
-  .dsh-fleet-shell .fl-grow-actions .fl-btn {white-space:normal}
+  .dsh-fleet-shell .fl-grow-with-actions > .fl-grow {padding-inline-start:10px}
 }
 @container fleet (max-width:600px) {
   .dsh-fleet-shell .fl-metrics.fl-strip {row-gap:16px}

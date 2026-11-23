@@ -24,7 +24,7 @@ for(const language of ['zh','en']) {
       const calls=[],o=options(language,drafts,{page});o.recreateDraft=value=>calls.push(value);o.navigate=()=>assert.fail('Incompatible title must not navigate');
       const tree=views.renderDashboard(o),markup=html(tree);
       for(const draft of drafts){assert.ok(!find(tree,'data-open-ticket',draft.id));assert.ok(find(tree,'data-fleet-incompatible-title',draft.id));assert.ok(find(tree,'data-fleet-incompatible-draft',draft.id));const action=find(tree,'data-fleet-recreate-draft',draft.id);assert.equal(action.props.children,copy.action);assert.equal(action.props.disabled,false);action.props.onClick();assert.equal(calls.at(-1).id,draft.id);assert.deepEqual(calls.at(-1).plan,draft.plan);}
-      assert.ok(markup.includes(copy.badge));assert.ok(markup.includes(copy.help));assert.ok(!markup.includes('data-fleet-draft-editor'));
+      assert.ok(markup.includes(copy.badge));assert.ok(!markup.includes(copy.help));assert.ok(!markup.includes('data-fleet-draft-editor'));
     }
     assert.deepEqual(drafts,before,'Rendering and callbacks must not mutate drafts or persisted status');
   });
