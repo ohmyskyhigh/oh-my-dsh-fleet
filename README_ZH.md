@@ -20,7 +20,7 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 | --- | --- | --- |
 | **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.10.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.10.0/oh-my-dsh-fleet-0.10.0.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.0.tgz" --ignore-scripts` |
 | **GitHub 仓库** | 粘贴 `https://github.com/ohmyskyhigh/oh-my-dsh-fleet`，从默认分支安装。 | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **npm** | 包标识为 `oh-my-dsh-fleet@0.10.0`。使用前请确认该版本已在 npm 上架。 | npm 上架后执行 `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.0`。 |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.10.0)** | 输入 `oh-my-dsh-fleet@0.10.0`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.0` |
 
 安装后启用插件，按提示重启桌面应用或 CLI Profile。在侧栏打开 **oh-my-dsh-fleet**，为目标 Workspace 开启 Fleet，然后在该 Workspace 的对话中发送 `/fleet help`。
 

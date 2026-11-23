@@ -20,7 +20,7 @@ oh-my-dsh-fleet is a multi-agent workflow plugin for DeepSeek Harness (DSH). Run
 | --- | --- | --- |
 | **GitHub Release** | Download [`oh-my-dsh-fleet-0.10.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.10.0/oh-my-dsh-fleet-0.10.0.tgz) and enter its absolute path. | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.0.tgz" --ignore-scripts` |
 | **GitHub repository** | Paste `https://github.com/ohmyskyhigh/oh-my-dsh-fleet` to install the default branch. | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **npm** | Package spec: `oh-my-dsh-fleet@0.10.0`. Check registry availability before choosing this route. | Once published: `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.0` |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.10.0)** | Enter `oh-my-dsh-fleet@0.10.0`. | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.0` |
 
 Enable the plugin after installing and restart the app or CLI Profile if prompted. Open **oh-my-dsh-fleet** from the sidebar, enable Fleet for the target Workspace, and send `/fleet help` in a chat within that Workspace.
 
