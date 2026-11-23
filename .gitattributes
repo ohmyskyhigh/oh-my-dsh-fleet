@@ -11,5 +11,5 @@
 .gitattributes text eol=lf
 
 # Preserve exact bytes for deterministic client builds.
-packages/fleet-shell/client.js -text -whitespace
-packages/fleet-shell/src/fleet-client.js -text -whitespace
+/client.js -text -whitespace
+/src/fleet-client.js -text -whitespace
