@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FleetCore } from '../packages/fleet-shell/src/fleet-core.js';
-import { normalizePlan } from '../packages/fleet-shell/src/fleet-model.js';
+import { FleetCore } from '../src/fleet-core.js';
+import { normalizePlan } from '../src/fleet-model.js';
 const plan = () => normalizePlan({goal:'Series',deliverables:['report.md'],criteria:['base'],agents:{writer:{profile:{instructions:'Write'}},reviewer:{profile:{instructions:'Review'}}},nodes:[{id:'write',agentId:'writer',dependsOn:[],task:{prompt:'Write'},modelSelection:{provider:'p',model:'base'}},{id:'review',agentId:'reviewer',dependsOn:['write'],task:{prompt:'Review'}}],gates:[{id:'check',from:['write'],to:['review'],reviewer:{kind:'agent',nodeId:'review'}}]});
 function fixture(seriesPlan=plan(),ticketPlan=structuredClone(seriesPlan)){
  const core=new FleetCore();core.saveDraftTicket('w',{id:'source',plan:structuredClone(seriesPlan)});core.createSeries('w',{id:'series',name:'Weekly',plan:seriesPlan,sourceTicketId:'source',scheduleId:'native-1',targetSessionId:'series-session',timing:{kind:'weekly',weekly:{time:'09:00',time_zone:'Asia/Shanghai',weekdays:[1]}}});

@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {setImmediate} from 'node:timers/promises';
-import {createFleetPlugin,draftRecreationPrompt} from '../packages/fleet-shell/src/fleet-client.js';
-import {isIncompatibleDraft,validatePlan} from '../packages/fleet-shell/src/fleet-model.js';
+import {createFleetPlugin,draftRecreationPrompt} from '../src/fleet-client.js';
+import {isIncompatibleDraft,validatePlan} from '../src/fleet-model.js';
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
-import {createFleetViews,workspaceFileTarget,fileHref,deliveryGapInfo,applyGatePolicy,applyTaskContract,applyDeliveryTarget} from '../packages/fleet-shell/src/fleet-ui.js';
-import {fleetTranslator} from '../packages/fleet-shell/src/fleet-locale.js';
+import {createFleetViews,workspaceFileTarget,fileHref,deliveryGapInfo,applyGatePolicy,applyTaskContract,applyDeliveryTarget} from '../src/fleet-ui.js';
+import {fleetTranslator} from '../src/fleet-locale.js';
 
 const response = body => ({ok:true,json:async()=>body});
 const view = (workspaceId,tickets=[]) => ({schemaVersion:1,workspaceId,catalog:{agents:[],orchestrations:[],binding:null,availablePresets:[]},tickets,selectedTicket:null,health:{ready:true,error:null}});
@@ -73,8 +73,8 @@ test('Explicit new-chat failure stays visible in the Dashboard',async t=>{
 });
 test('Fleet registers only additive panels and never disables the native Workspace provider',async t=>{
  const h=await harness(t);assert.deepEqual([...new Set(h.elements.map(e=>e.options.name))].sort(),['conversation.view','main','sidebar.panellist']);
- const patch=await readFile('packages/fleet-shell/cordis.patch.yml','utf8');assert.doesNotMatch(patch,/ui-workspace|disabled:/);
- const generated=await readFile('packages/fleet-shell/client.js','utf8');assert.doesNotMatch(generated,/createWorkspacePlugin|class UiWorkspace|sidebar\.workspaces\.workspace\.item/);
+ const patch=await readFile('cordis.patch.yml','utf8');assert.doesNotMatch(patch,/ui-workspace|disabled:/);
+ const generated=await readFile('client.js','utf8');assert.doesNotMatch(generated,/createWorkspacePlugin|class UiWorkspace|sidebar\.workspaces\.workspace\.item/);
 });
 
 const sampleTicket=(workspaceId,id,status='running')=>({workspaceId,id,originSessionId:'s1',revision:1,status,plan:{contractVersion:3,goal:id,inputs:{},deliverables:[],criteria:[],agents:{},nodes:[],gates:[]},execution:null,activity:[]});

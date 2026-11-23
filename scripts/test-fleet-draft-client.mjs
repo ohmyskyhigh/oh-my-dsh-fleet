@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createFleetDraftClient} from '../packages/fleet-shell/src/fleet-draft-client.js';
+import {createFleetDraftClient} from '../src/fleet-draft-client.js';
 
 const scope={workspaceId:'w1',sessionId:'s1'};
 const draft=(id='d1',revision=1,extra={})=>({id,workspaceId:scope.workspaceId,originSessionId:scope.sessionId,revision,status:'draft',plan:{contractVersion:3,goal:`Goal ${revision}`,inputs:{},deliverables:[],criteria:[],agents:{},nodes:[],gates:[]},execution:null,activity:[],createdAt:'2026-11-11T01:00:00Z',updatedAt:'2026-11-11T01:00:00Z',...extra});

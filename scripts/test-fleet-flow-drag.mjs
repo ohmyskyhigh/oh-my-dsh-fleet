@@ -7,8 +7,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {setTimeout as delay} from 'node:timers/promises';
 const tick = () => delay(20); // outlast the component's setTimeout(0) suppression reset
-import {createFleetViews} from '../packages/fleet-shell/src/fleet-ui.js';
-import {fleetStyles} from '../packages/fleet-shell/src/fleet-theme.js';
+import {createFleetViews} from '../src/fleet-ui.js';
+import {fleetStyles} from '../src/fleet-theme.js';
 
 // --- deterministic React hook runtime -------------------------------------------------
 function makeRuntime() {

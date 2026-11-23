@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { normalizePlan, validatePlan, projectTicket, deliverableView, effectiveModelSelection } from '../packages/fleet-shell/src/fleet-model.js';
-import { FleetCore } from '../packages/fleet-shell/src/fleet-core.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { createDshAdapter } from '../packages/fleet-shell/src/fleet-dsh-adapter.js';
+import { normalizePlan, validatePlan, projectTicket, deliverableView, effectiveModelSelection } from '../src/fleet-model.js';
+import { FleetCore } from '../src/fleet-core.js';
+import { FleetService } from '../src/fleet-service.js';
+import { createDshAdapter } from '../src/fleet-dsh-adapter.js';
 
 const item = { title: 'Audit pack', description: 'What the audit contains and achieves', text: 'qa/audit/: report.md, ledger.json (validate.py passes)', criteria: ['c1: pack complete\nvalidate.py passes'] };
 const basePlan = (extra = {}) => normalizePlan({ goal: 'Deliver', deliverables: [item, 'legacy string'], criteria: ['ticket-wide governance'], agents: { w: { name: 'Writer', profile: { instructions: 'write' } } }, nodes: [{ id: 'n1', agentId: 'w', dependsOn: [], task: { prompt: 'full spec', summary: 'I will write the report, achieving an acceptance-ready result' } }], gates: [], ...extra });

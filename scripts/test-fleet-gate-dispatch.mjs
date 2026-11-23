@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { effectiveGateModelSelection, normalizePlan, projectTicket } from '../packages/fleet-shell/src/fleet-model.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
+import { effectiveGateModelSelection, normalizePlan, projectTicket } from '../src/fleet-model.js';
+import { FleetService } from '../src/fleet-service.js';
 
 const titleModel = { provider: 'p', model: 'title-model', reasoningEffort: 'high' };
 const outlineModel = { provider: 'p', model: 'outline-model', reasoningEffort: 'low' };

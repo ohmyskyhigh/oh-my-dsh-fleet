@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { FleetCore } from '../packages/fleet-shell/src/fleet-core.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { FleetStore } from '../packages/fleet-shell/src/fleet-store.js';
-import { normalizePlan, validatePlan, isIncompatibleDraft } from '../packages/fleet-shell/src/fleet-model.js';
+import { FleetCore } from '../src/fleet-core.js';
+import { FleetService } from '../src/fleet-service.js';
+import { FleetStore } from '../src/fleet-store.js';
+import { normalizePlan, validatePlan, isIncompatibleDraft } from '../src/fleet-model.js';
 
 const settings = { revision: 1, rules: [], generation: { rules: [] }, execution: { rules: [] } };
 const stateWith = (tickets, id = 'w') => ({ schemaVersion: 2, templates: [], settings, workspaces: [{ id, tickets }] });

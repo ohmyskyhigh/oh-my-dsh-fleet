@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { normalizePlan, projectTicket, readableTitle } from '../packages/fleet-shell/src/fleet-model.js';
+import { FleetService } from '../src/fleet-service.js';
+import { normalizePlan, projectTicket, readableTitle } from '../src/fleet-model.js';
 
 const plan = (extra = {}) => normalizePlan({ goal: 'Build and verify the report', deliverables: [], criteria: [], agents: { writer: { name: '撰写员', profile: { instructions: 'write' } } }, nodes: [{ id: 'draft', agentId: 'writer', dependsOn: [], task: { prompt: 'write', summary: 'I will write' } }], gates: [], ...extra });
 function host() {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDshAdapter, adapterInject } from '../packages/fleet-shell/src/fleet-dsh-adapter.js';
+import { createDshAdapter, adapterInject } from '../src/fleet-dsh-adapter.js';
 
 // Shapes copied from runtime-evidence dsh-agent-loop and dsh-api-session-controller.
 // user/message data is the message itself, never {turn, message}.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createFleetLanguage, fleetLanguageStorageKey, fleetDictionaries, fleetTranslator, fleetResponseError, fleetErrorRecord, fleetErrorText } from '../packages/fleet-shell/src/fleet-locale.js';
+import { createFleetLanguage, fleetLanguageStorageKey, fleetDictionaries, fleetTranslator, fleetResponseError, fleetErrorRecord, fleetErrorText } from '../src/fleet-locale.js';
 
 function memoryStorage(initial = null) {
   const values = new Map(initial === null ? [] : [[fleetLanguageStorageKey, initial]]), writes = [];
@@ -149,7 +149,7 @@ test('missing Host and browser services use English fallback and remain disposab
 
 test('Chinese and English dictionaries have matching complete keys and placeholders', async () => {
   assert.deepEqual(Object.keys(fleetDictionaries.zh).sort(), Object.keys(fleetDictionaries.en).sort());
-  const source = (await Promise.all(['fleet-client.js', 'fleet-ui.js'].map(file => readFile(new URL('../packages/fleet-shell/src/' + file, import.meta.url), 'utf8')))).join('\n');
+  const source = (await Promise.all(['fleet-client.js', 'fleet-ui.js'].map(file => readFile(new URL('../src/' + file, import.meta.url), 'utf8')))).join('\n');
   const used = [...source.matchAll(/\bt\('([^']+)'\)/g)].map(match => match[1]);
   used.push('control', 'actionSaved', 'saved', 'saving', 'enable', 'disable', 'modeOn', 'available', 'disabledTarget', 'unavailable', 'requestFailed', 'invalidResponseVersion', 'invalidModesResponse', 'invalidWorkspaceResponse', 'invalidActionResponse');
   const placeholders = value => [...value.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort();

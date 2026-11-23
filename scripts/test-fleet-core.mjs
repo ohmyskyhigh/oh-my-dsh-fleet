@@ -1,8 +1,8 @@
 // Canonical Ticket domain acceptance. Memory only; no real Sessions or business data.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FleetCore, FleetCoreError } from '../packages/fleet-shell/src/fleet-core.js';
-import { normalizePlan, validatePlan, projectTicket, graphLevels } from '../packages/fleet-shell/src/fleet-model.js';
+import { FleetCore, FleetCoreError } from '../src/fleet-core.js';
+import { normalizePlan, validatePlan, projectTicket, graphLevels } from '../src/fleet-model.js';
 const plan = () => normalizePlan({ goal: 'Ship verified work', inputs: { nested: { paths: ['one', 'two'] } }, deliverables: [], criteria: ['line one\nline two'], requirements: 'scope', agents: { writer: { name: 'Writer', profile: { instructions: 'write', nested: { supportedMetadata: true } } }, reviewer: { profile: { instructions: 'review' } } }, nodes: [{ id: 'a', role: 'same', agentId: 'writer', task: { prompt: 'first', extra: { keep: true } }, dependsOn: [] }, { id: 'b', role: 'same', agentId: 'reviewer', dependsOn: ['a'], task: { prompt: 'second' } }], gates: [] });
 function fixture(p = plan()) {
   const core = new FleetCore();

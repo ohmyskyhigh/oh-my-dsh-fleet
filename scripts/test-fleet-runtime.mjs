@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createFleetRuntimeLifecycle, resolveFleetRoot } from '../packages/fleet-shell/src/fleet-runtime-lifecycle.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { FleetStore } from '../packages/fleet-shell/src/fleet-store.js';
+import { createFleetRuntimeLifecycle, resolveFleetRoot } from '../src/fleet-runtime-lifecycle.js';
+import { FleetService } from '../src/fleet-service.js';
+import { FleetStore } from '../src/fleet-store.js';
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const plan = () => ({ goal: 'runtime fixture', agents: { writer: { profile: { instructions: 'fixture only' } } }, nodes: [{ id: 'a', agentId: 'writer', task: { prompt: 'fixture task' } }], gates: [] });
 function clock() {

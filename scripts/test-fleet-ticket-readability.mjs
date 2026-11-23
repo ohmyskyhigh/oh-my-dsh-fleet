@@ -6,12 +6,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { normalizePlan, validatePlan, projectTicket, deliverableView, isIncompatibleDraft } from '../packages/fleet-shell/src/fleet-model.js';
-import { createFleetViews } from '../packages/fleet-shell/src/fleet-ui.js';
+import { normalizePlan, validatePlan, projectTicket, deliverableView, isIncompatibleDraft } from '../src/fleet-model.js';
+import { createFleetViews } from '../src/fleet-ui.js';
 
 const views = createFleetViews(React);
 const html = node => renderToStaticMarkup(node);
-const fleetStyles = readFileSync(new URL('../packages/fleet-shell/src/fleet-theme.js', import.meta.url), 'utf8');
+const fleetStyles = readFileSync(new URL('../src/fleet-theme.js', import.meta.url), 'utf8');
 
 const node = (id, deps = [], status = 'pending', extra = {}) => ({ id, role: 'worker', agentId: 'w1', dependsOn: deps, task: { prompt: `do ${id}`, summary: `我会完成 ${id}` }, ...extra });
 const plan = (deliverables = [], nodes = [node('a')], gates = []) => ({ contractVersion: 3, goal: 'g', title: 'T', inputs: {}, deliverables, criteria: [], requirements: undefined, agents: { w1: { name: 'W', profile: {} } }, nodes, gates });

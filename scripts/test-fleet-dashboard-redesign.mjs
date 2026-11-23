@@ -6,9 +6,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createFleetViews } from '../packages/fleet-shell/src/fleet-ui.js';
-import { graphLevels, TICKET_STATUSES } from '../packages/fleet-shell/src/fleet-model.js';
-import { fleetStyles } from '../packages/fleet-shell/src/fleet-theme.js';
+import { createFleetViews } from '../src/fleet-ui.js';
+import { graphLevels, TICKET_STATUSES } from '../src/fleet-model.js';
+import { fleetStyles } from '../src/fleet-theme.js';
 
 const views = createFleetViews(React);
 const noop = () => {};

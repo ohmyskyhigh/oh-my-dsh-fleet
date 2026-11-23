@@ -8,7 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { FleetStore, jsonClone, validateTemplates, validateWorkspaceState, ticketFilename } from '../packages/fleet-shell/src/fleet-store.js';
+import { FleetStore, jsonClone, validateTemplates, validateWorkspaceState, ticketFilename } from '../src/fleet-store.js';
 
 const owned = new Set();
 async function temp(t) {
@@ -163,7 +163,7 @@ test('transaction callback reads the latest committed state under the chain lock
 
 test('independent Node processes use file-lock read-modify-write without lost Tickets', async t => {
   const base = await temp(t), rootPath = path.join(base, 'root'), workspacePaths = { shared: path.join(base, 'shared') };
-  const serviceUrl = new URL('../packages/fleet-shell/src/fleet-service.js', import.meta.url).href;
+  const serviceUrl = new URL('../src/fleet-service.js', import.meta.url).href;
   const run = label => new Promise((resolve, reject) => {
     const script = `import { FleetService } from ${JSON.stringify(serviceUrl)}; const adapter = {async create(){throw Error('no execution');},async submit(){},async inspect(){},async cancel(){},async message(){}}; const service = await FleetService.open({rootPath:${JSON.stringify(rootPath)},workspacePaths:${JSON.stringify(workspacePaths)},adapter,autoStart:false}); try { for(let i=0;i<4;i++) await service.saveDraftTicket('shared',{id:${JSON.stringify(label)}+i,plan:{goal:${JSON.stringify(label)}+i}}); } finally { await service.close(); }`;
     const child = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: 'inherit' }); child.once('error', reject); child.once('exit', code => resolve(code));

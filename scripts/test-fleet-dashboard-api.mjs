@@ -5,10 +5,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { registerHooks } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { FleetStore } from '../packages/fleet-shell/src/fleet-store.js';
-import { normalizePlan, projectTicket } from '../packages/fleet-shell/src/fleet-model.js';
-import { registerFleetDashboardApi } from '../packages/fleet-shell/src/fleet-dashboard-api.js';
+import { FleetService } from '../src/fleet-service.js';
+import { FleetStore } from '../src/fleet-store.js';
+import { normalizePlan, projectTicket } from '../src/fleet-model.js';
+import { registerFleetDashboardApi } from '../src/fleet-dashboard-api.js';
 
 // All filesystem state is test-owned; no Profile, server, Desktop or real Agent.
 const deferred = () => {
@@ -488,7 +488,7 @@ async function runtimeModule() {
     if (specifier === '@deepseek-ai/dsh-llm') return { url: 'data:text/javascript,export const createUserMessage = text => ({ role: "user", content: [{ type: "text", text }] });', shortCircuit: true };
     return nextResolve(specifier, context);
   } });
-  try { runtime = await import('../packages/fleet-shell/runtime.js'); return runtime; }
+  try { runtime = await import('../runtime.js'); return runtime; }
   finally { hooks.deregister(); }
 }
 function runtimeContext(locations) {

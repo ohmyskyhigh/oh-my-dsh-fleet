@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {FleetCore} from '../packages/fleet-shell/src/fleet-core.js';
+import {FleetCore} from '../src/fleet-core.js';
 function fixture(){
  const c=new FleetCore(), h=c.human('w','user');
  h.saveTemplate({id:'writer',kind:'agent',name:'Writer',content:{profile:{instructions:'original'}}});

@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
-import { createFleetPlugin } from '../packages/fleet-shell/src/fleet-client.js';
+import { createFleetPlugin } from '../src/fleet-client.js';
 
 const scope={workspaceId:'w1',sessionId:'s1'};
 const PANE_KEY='oh-my-agent-fleet/ticket-draft';

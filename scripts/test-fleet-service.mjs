@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { FleetStore } from '../packages/fleet-shell/src/fleet-store.js';
-import { normalizePlan } from '../packages/fleet-shell/src/fleet-model.js';
+import { FleetService } from '../src/fleet-service.js';
+import { FleetStore } from '../src/fleet-store.js';
+import { normalizePlan } from '../src/fleet-model.js';
 const deferred = () => { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve }; };
 const plan = () => normalizePlan({ goal: 'Build and verify', inputs: { url: 'fixture', nested: ['keep'] }, deliverables: [], criteria: ['verify'], agents: { writer: { profile: { instructions: 'write' } }, checker: { profile: { instructions: 'check' } } }, nodes: [{ id: 'a', role: 'same', agentId: 'writer', dependsOn: [], task: { prompt: 'a' } }, { id: 'b', role: 'same', agentId: 'checker', dependsOn: ['a'], task: { prompt: 'b' } }], gates: [] });
 function host() {

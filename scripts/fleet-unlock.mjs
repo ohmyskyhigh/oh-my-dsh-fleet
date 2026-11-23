@@ -1,4 +1,4 @@
-import { FleetStore } from '../packages/fleet-shell/src/fleet-store.js';
+import { FleetStore } from '../src/fleet-store.js';
 const rootPath = process.argv[2];
 if (!rootPath || process.argv.length !== 3) {
   console.error('Usage: node scripts/fleet-unlock.mjs <absolute Fleet Root path>');

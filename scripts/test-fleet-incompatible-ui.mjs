@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createFleetViews } from '../packages/fleet-shell/src/fleet-ui.js';
+import { createFleetViews } from '../src/fleet-ui.js';
 
 const validPlan={contractVersion:3,goal:'Original needs',inputs:{source:'original'},deliverables:[],criteria:[],agents:{},nodes:[],gates:[]};
 const ticket=(id,plan=validPlan,extra={})=>({id,workspaceId:'workspace',originSessionId:'source-session',status:'draft',revision:7,plan:structuredClone(plan),execution:null,activity:[],...extra});

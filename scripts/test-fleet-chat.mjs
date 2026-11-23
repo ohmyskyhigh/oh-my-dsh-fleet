@@ -5,9 +5,9 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { registerFleetChat, fleetHelp } from '../packages/fleet-shell/src/fleet-chat.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { normalizePlan, projectTicket } from '../packages/fleet-shell/src/fleet-model.js';
+import { registerFleetChat, fleetHelp } from '../src/fleet-chat.js';
+import { FleetService } from '../src/fleet-service.js';
+import { normalizePlan, projectTicket } from '../src/fleet-model.js';
 
 const agent = Object.freeze({ identity: 'actual-dsh-agent' });
 const actualContext = { workspaceId: 'actual-workspace', workspacePath: path.resolve('chat-fixture-workspace'), sessionId: 'actual-session' };

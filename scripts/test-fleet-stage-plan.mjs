@@ -8,9 +8,9 @@ import path from 'node:path';
 import os from 'node:os';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { normalizePlan, validatePlan, projectTicket, stagePlanView } from '../packages/fleet-shell/src/fleet-model.js';
-import { createFleetViews } from '../packages/fleet-shell/src/fleet-ui.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
+import { normalizePlan, validatePlan, projectTicket, stagePlanView } from '../src/fleet-model.js';
+import { createFleetViews } from '../src/fleet-ui.js';
+import { FleetService } from '../src/fleet-service.js';
 
 const views = createFleetViews(React);
 const html = node => renderToStaticMarkup(node);

@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {chromium} from 'playwright-core';
 
 // Isolated real-DOM fixture. No DSH URL, account, profile or plugin state is used.
-const source = await readFile(new URL('../packages/fleet-shell/src/fleet-workspace-nav.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/fleet-workspace-nav.js', import.meta.url), 'utf8');
 const script = source.replace('export function mountWorkspaceDashboardLinks(', 'window.mountWorkspaceDashboardLinks = function mountWorkspaceDashboardLinks(');
 let browser;
 before(async () => {

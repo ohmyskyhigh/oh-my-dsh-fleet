@@ -7,10 +7,10 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { FleetCore } from '../packages/fleet-shell/src/fleet-core.js';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { FleetStore } from '../packages/fleet-shell/src/fleet-store.js';
-import { normalizePlan, validatePlan, projectTicket } from '../packages/fleet-shell/src/fleet-model.js';
+import { FleetCore } from '../src/fleet-core.js';
+import { FleetService } from '../src/fleet-service.js';
+import { FleetStore } from '../src/fleet-store.js';
+import { normalizePlan, validatePlan, projectTicket } from '../src/fleet-model.js';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const rejects = (fn, code) => assert.throws(fn, e => e.code === code);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { apply, inject } from '../packages/fleet-shell/index.js';
+import { apply, inject } from '../index.js';
 
 // Contract seams mirror the inspected Host services; no Profile, filesystem,
 // Session service, server, or model is touched by this test suite.

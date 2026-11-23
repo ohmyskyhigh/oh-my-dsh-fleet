@@ -6,10 +6,10 @@ import path from 'node:path';
 import os from 'node:os';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { FleetService } from '../packages/fleet-shell/src/fleet-service.js';
-import { normalizePlan, projectTicket } from '../packages/fleet-shell/src/fleet-model.js';
-import { registerFleetChat } from '../packages/fleet-shell/src/fleet-chat.js';
-import { createFleetViews } from '../packages/fleet-shell/src/fleet-ui.js';
+import { FleetService } from '../src/fleet-service.js';
+import { normalizePlan, projectTicket } from '../src/fleet-model.js';
+import { registerFleetChat } from '../src/fleet-chat.js';
+import { createFleetViews } from '../src/fleet-ui.js';
 
 const plan = (extra = {}) => normalizePlan({ goal: 'Build and verify', deliverables: [], criteria: ['verify'], agents: { writer: { profile: { instructions: 'write' } } }, nodes: [{ id: 'a', agentId: 'writer', dependsOn: [], task: { prompt: 'a', summary: 'I will build, achieving a verified result' } }], gates: [], ...extra });
 function host() {
