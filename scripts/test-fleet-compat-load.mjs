@@ -93,6 +93,24 @@ test('service reads a workspace containing an incompatible draft without faultin
   assert.equal(isIncompatibleDraft(tickets[0]), true);
   assert.equal(f.service.health.ready, true);
 });
+test('incompatible draft with unrecognized routing fields remains visible and cannot break the Dashboard', async t => {
+  const f = await serviceFixture(t);
+  const oldPlan = {...incompatiblePlan, logicGates: {draft: true}, ticketDependencySeries: 'unrecognized', nodes: [{id: 'old-node', ticketDependencySeries: 4}]};
+  const malformedPlan = {...normalizePlan({goal:'Invalid routing draft'}), logicGates: [{id:'incomplete', routes: [null]}], ticketDependencies: 'unrecognized'};
+  const legacy = {...draft('old', oldPlan), workspaceId:'a'};
+  const malformed = {...draft('malformed', malformedPlan), workspaceId:'a'};
+  const valid = {...draft('valid', normalizePlan({goal:'Readable'})), workspaceId:'a'};
+  await writeWorkspace(path.join(f.temp, 'a', '.fleet'), 'a', [legacy, malformed, valid]);
+  const [oldRow, malformedRow, validRow] = await f.service.dashboardTickets('a');
+  assert.equal(isIncompatibleDraft(oldRow), true);
+  assert.equal(isIncompatibleDraft(malformedRow), true);
+  assert.equal(isIncompatibleDraft(validRow), false);
+  assert.deepEqual(oldRow.plan, oldPlan);
+  assert.deepEqual(malformedRow.plan, malformedPlan);
+  assert.equal(oldRow.dependencyReadiness, undefined);
+  assert.equal(malformedRow.dependencyReadiness, undefined);
+  assert.equal(f.service.health.ready, true);
+});
 test('a write transaction on one workspace is not broken by another workspace incompatible draft (chain guard)', async t => {
   const f = await serviceFixture(t);
   const incA = { ...draft('inc', structuredClone(incompatiblePlan)), workspaceId: 'a' };

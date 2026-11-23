@@ -13,6 +13,29 @@ const text = (v, label) => { requireThat(typeof v === 'string' && v.trim(), 'inv
 const copy = value => structuredClone(value);
 const now = () => new Date().toISOString();
 const inflight = d => ['created', 'submit-intent', 'submitted', 'uncertain'].includes(d?.phase);
+const finishedNode = status => status === 'completed' || status === 'skipped';
+const finishedGate = status => status === 'passed' || status === 'skipped';
+const skippedItem = (execution, item) => Boolean(item?.whenNodeRuns && execution.nodes[item.whenNodeRuns]?.status === 'skipped');
+const ownValue = (map, key) => map && Object.hasOwn(map, key) ? map[key] : undefined;
+const allRefs = (plan, key) => [...new Set([plan, ...(plan.nodes ?? [])].flatMap(part => part[key] ?? []))];
+function matchesCondition(handoff, { path, operator, value }) {
+  let actual = handoff;
+  for (const key of path) {
+    if (actual === null || typeof actual !== 'object' || !Object.hasOwn(actual, key)) return false;
+    actual = actual[key];
+  }
+  if (operator === 'exists') return true;
+  if (operator === 'eq') return actual === value;
+  if (operator === 'ne') return actual !== value;
+  if (typeof actual !== typeof value || !['string', 'number'].includes(typeof actual)) return false;
+  switch (operator) {
+    case 'gt': return actual > value;
+    case 'gte': return actual >= value;
+    case 'lt': return actual < value;
+    case 'lte': return actual <= value;
+    default: return false;
+  }
+}
 const archived = (original, format) => ({ format, sha256: createHash('sha256').update(JSON.stringify(original)).digest('hex'), original: copy(original) });
 export function nativeProgressRow(item, actor) {
   const { time, intent, text, step, status, tool } = item;
@@ -32,12 +55,16 @@ const SERIES_KEYS = ['id', 'workspaceId', 'revision', 'name', 'plan', 'sourceTic
 const isRecord = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 export function assertSeriesShape(s, workspaceId) {
   object(s, 'series');
-  requireThat(Object.keys(s).every(k => [...SERIES_KEYS, 'host', 'sourceTemplateId'].includes(k)) && SERIES_KEYS.every(k => Object.hasOwn(s, k)), 'invalid-state', 'Invalid series fields.');
+  requireThat(Object.keys(s).every(k => [...SERIES_KEYS, 'host', 'sourceTemplateId', 'triggerSeriesId', 'triggerAfterCount'].includes(k)) && SERIES_KEYS.every(k => Object.hasOwn(s, k)), 'invalid-state', 'Invalid series fields.');
   text(s.id, 'series id'); requireThat(s.workspaceId === workspaceId, 'invalid-state', 'Series workspaceId does not match its Workspace.');
   requireThat(Number.isSafeInteger(s.revision) && s.revision > 0, 'invalid-state', 'Invalid series revision.');
   text(s.name, 'series name'); text(s.scheduleId, 'series scheduleId'); text(s.targetSessionId, 'series targetSessionId');
   requireThat(s.sourceTicketId === null || typeof s.sourceTicketId === 'string' && s.sourceTicketId.length > 0, 'invalid-state', 'series sourceTicketId must be a Ticket ID or null.');
   requireThat(Array.isArray(s.sourceRefs), 'invalid-state', 'series sourceRefs must be an array.');
+  if (s.triggerSeriesId !== undefined || s.triggerAfterCount !== undefined) {
+    requireThat(typeof s.triggerSeriesId === 'string' && s.triggerSeriesId !== s.id && Number.isSafeInteger(s.triggerAfterCount) && s.triggerAfterCount >= 0, 'invalid-state', 'Invalid upstream series trigger.');
+    requireThat(allRefs(s.plan, 'ticketDependencySeries').includes(s.triggerSeriesId), 'invalid-state', 'Trigger must be a configured upstream series.');
+  }
   if (s.sourceTemplateId !== undefined) text(s.sourceTemplateId,'series source template');
   for (const ref of s.sourceRefs) {
     requireThat(isRecord(ref) && typeof ref.templateId === 'string' && ref.templateId.trim() && Number.isSafeInteger(ref.templateRevision) && ref.templateRevision >= 1,'invalid-state','Invalid series template reference.');
@@ -59,7 +86,7 @@ export function assertSeriesShape(s, workspaceId) {
     requireThat(utc(o.occurrenceAt) && !seen.has(Date.parse(o.occurrenceAt)), 'invalid-state', 'Invalid or duplicate occurrenceAt.');
     seen.add(Date.parse(o.occurrenceAt));
     requireThat(utc(o.createdAt), 'invalid-state', 'Invalid occurrence createdAt.');
-    if (o.status === 'started') requireThat(typeof o.ticketId === 'string' && o.ticketId.length > 0, 'invalid-state', 'A started occurrence needs its Ticket ID.');
+    if (['started','waiting'].includes(o.status)) requireThat(typeof o.ticketId === 'string' && o.ticketId.length > 0, 'invalid-state', 'A started occurrence needs its Ticket ID.');
     else requireThat(o.status === 'failed' && o.ticketId === null && typeof o.error === 'string' && o.error.trim(), 'invalid-state', 'A failed occurrence needs null ticketId and an error.');
   }
   if (s.host !== undefined) {
@@ -215,7 +242,10 @@ export class FleetCore {
         requireThat(Array.isArray(w.tickets) && !('binding' in w || 'definitions' in w), 'invalid-state', 'Workspace stores Tickets only.'); unique(w.tickets, 'Ticket');
         if (Object.hasOwn(w, 'series')) {
           requireThat(Array.isArray(w.series), 'invalid-state', 'Workspace series must be an array.'); unique(w.series, 'Series');
-          for (const s of w.series) assertSeriesShape(s, w.id);
+          for (const s of w.series) {
+            assertSeriesShape(s, w.id);
+            for (const o of s.occurrences) if (o.status === 'waiting') requireThat(w.tickets.some(t => t.id === o.ticketId), 'invalid-state', 'Waiting occurrence has no Ticket.');
+          }
         }
         for (const t of w.tickets) {
           requireThat(t.workspaceId === w.id && Number.isSafeInteger(t.revision) && t.revision > 0 && TICKET_STATUSES.includes(t.status), 'invalid-state', 'Invalid Ticket identity, revision or status.');
@@ -232,6 +262,11 @@ export class FleetCore {
             // Execution structure is still validated strictly below. The gate never mutates state, so chain guards hold.
             if (validatePlan(t.plan, { mode: 'save' }).valid) planInput(t.plan, { allowMissingVersion: false });
           }
+          if (t.dependencyAuthorization !== undefined) {
+            const auth = t.dependencyAuthorization;
+            requireThat(t.status === 'draft' && !t.abandonedAt && isRecord(auth) && Number.isSafeInteger(auth.revision) && auth.revision > 0 && auth.revision <= t.revision && utc(auth.time) && isRecord(auth.actor), 'invalid-state', 'Invalid dependency authorization.');
+          }
+          if (t.dependencyBindings !== undefined) requireThat(isRecord(t.dependencyBindings) && Object.entries(t.dependencyBindings).every(([sid, tid]) => w.series?.some(s => s.id === sid && s.occurrences.some(o => o.ticketId === tid && tid))), 'invalid-state', 'Invalid dependency bindings.');
           if (t.execution) {
             const e = t.execution; object(e.nodes, 'execution nodes'); object(e.gates, 'execution gates'); object(e.configurations, 'configurations');
             requireThat(Object.hasOwn(e.configurations, e.currentConfigRevision), 'invalid-state', 'Missing frozen configuration.');
@@ -239,8 +274,15 @@ export class FleetCore {
             if (e.artifacts !== undefined) { object(e.artifacts, 'execution artifacts'); for (const a of Object.values(e.artifacts)) { requireThat(typeof a.nodeId === 'string' && Array.isArray(a.versions), 'invalid-state', 'Invalid artifact.'); for (const v of a.versions) requireThat(Number.isSafeInteger(v.version) && v.version > 0 && typeof v.sha256 === 'string', 'invalid-state', 'Invalid artifact version.'); } }
             if (e.deliverables !== undefined) object(e.deliverables, 'execution deliverables');
             if (e.delivery !== undefined) { object(e.delivery, 'delivery'); requireThat(Array.isArray(e.delivery.history), 'invalid-state', 'Invalid delivery history.'); }
+            if (e.logicDecisions !== undefined) {
+              object(e.logicDecisions, 'Logic Gate decisions');
+              for (const [id, decision] of Object.entries(e.logicDecisions)) {
+                const gate = e.configurations[decision?.configRevision]?.plan?.logicGates?.find(g => g.id === id);
+                requireThat(gate && decision.gateId === id && decision.from === gate.from && e.nodes[gate.from]?.attempts.at(-1)?.id === decision.attemptId && e.nodes[gate.from]?.status === 'completed' && Array.isArray(decision.routes) && decision.routes.length === gate.routes.length && decision.routes.every((r, i) => r.id === gate.routes[i].id && typeof r.matched === 'boolean'), 'invalid-state', 'Invalid persisted Logic Gate decision.');
+              }
+            }
             for (const n of Object.values(e.nodes)) {
-              requireThat(['pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(n.status) && Array.isArray(n.attempts) && Array.isArray(n.thread), 'invalid-state', 'Invalid Node execution.');
+              requireThat(['pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'skipped'].includes(n.status) && Array.isArray(n.attempts) && Array.isArray(n.thread), 'invalid-state', 'Invalid Node execution.');
               for (const a of n.attempts) {
                 requireThat(!attempts.has(a.id), 'invalid-state', 'Duplicate Attempt.'); attempts.add(a.id);
                 requireThat(a.configRevision === null && t.legacy || Object.hasOwn(e.configurations, a.configRevision), 'invalid-state', 'Unknown Attempt configuration.');
@@ -251,15 +293,15 @@ export class FleetCore {
               if (n.status === 'running') requireThat(n.attempts.at(-1)?.status === 'running', 'invalid-state', 'Running Node lacks active Attempt.');
             }
             const gateSessions = g => { if (g.dispatch?.sessionId) { requireThat(!sessions.has(g.dispatch.sessionId), 'invalid-state', 'Duplicate Session ownership.'); sessions.add(g.dispatch.sessionId); } };
-            const gateShape = g => { requireThat(['pending', 'passed', 'returned'].includes(g.status) && Array.isArray(g.reviews), 'invalid-state', 'Invalid Gate.'); if (g.autoReworkRounds !== undefined) requireThat(Number.isSafeInteger(g.autoReworkRounds) && g.autoReworkRounds >= 0, 'invalid-state', 'Invalid Gate rework budget.'); for (const r of g.reviews) if (r.artifactRefs !== undefined) requireThat(Array.isArray(r.artifactRefs), 'invalid-state', 'Invalid review artifactRefs.'); gateSessions(g); };
+            const gateShape = g => { requireThat(['pending', 'passed', 'returned', 'skipped'].includes(g.status) && Array.isArray(g.reviews), 'invalid-state', 'Invalid Gate.'); if (g.autoReworkRounds !== undefined) requireThat(Number.isSafeInteger(g.autoReworkRounds) && g.autoReworkRounds >= 0, 'invalid-state', 'Invalid Gate rework budget.'); for (const r of g.reviews) if (r.artifactRefs !== undefined) requireThat(Array.isArray(r.artifactRefs), 'invalid-state', 'Invalid review artifactRefs.'); gateSessions(g); };
             for (const g of Object.values(e.gates)) { gateShape(g); for (const h of g.history ?? []) gateSessions(h); }
             if (t.status === 'stopped') requireThat(!Object.values(e.nodes).some(n => ['running', 'pending'].includes(n.status)) && !Object.values(e.gates).some(g => inflight(g.dispatch)), 'invalid-state', 'Stopped Ticket has active work.');
             if (t.status === 'delivered') {
-              requireThat(Object.values(e.nodes).every(n => n.status === 'completed') && Object.values(e.gates).every(g => g.status === 'passed'), 'invalid-state', 'Delivered Ticket is incomplete.');
+              requireThat(Object.values(e.nodes).every(n => finishedNode(n.status)) && Object.values(e.gates).every(g => finishedGate(g.status)), 'invalid-state', 'Delivered Ticket is incomplete.');
               const declared = e.configurations[e.currentConfigRevision]?.plan?.deliverables ?? [];
               // Tickets that engaged the evidence protocol must carry delivery evidence; pre-0.6.0
               // delivered records without the new groups keep their original invariant (compat).
-              if (declared.length && (e.artifacts || e.deliverables || e.delivery)) requireThat(e.delivery?.override || (e.delivery?.history?.length && declared.every((_, i) => e.deliverables?.[String(i)]?.artifactId && e.delivery.history.some(h => (h.items ?? []).some(it => it.deliverableIndex === i)))), 'invalid-state', 'Delivered Ticket lacks delivery evidence.');
+              if (declared.length && (e.artifacts || e.deliverables || e.delivery)) requireThat(e.delivery?.override || declared.every((item, i) => skippedItem(e, item) || (e.deliverables?.[String(i)]?.artifactId && e.delivery?.history?.some(h => (h.items ?? []).some(it => it.deliverableIndex === i)))), 'invalid-state', 'Delivered Ticket lacks delivery evidence.');
             }
           } else requireThat(['draft', 'superseded'].includes(t.status), 'invalid-state', 'Started Ticket needs execution.');
         }
@@ -269,6 +311,66 @@ export class FleetCore {
   }
   #workspace(id, create = false) { let w = this.#state.workspaces.find(w => w.id === id); if (!w && create) { w = { id: text(id, 'Workspace ID'), tickets: [] }; this.#state.workspaces.push(w); } requireThat(w, 'unknown-workspace', 'Workspace is not mapped.'); return w; }
   #ticket(ws, id) { const t = this.#workspace(ws).tickets.find(t => t.id === id); requireThat(t, 'unknown-ticket', 'Ticket does not belong to this Workspace.'); return t; }
+  #validateDependencies(w, id, plan, seriesId = null, bindings = {}) {
+    const visit = (key, edges, seen, active) => {
+      if (active.has(key)) fail('invalid-flow', `Dependency cycle at ${key}.`);
+      if (seen.has(key)) return;
+      active.add(key);
+      for (const upstream of edges(key)) visit(upstream, edges, seen, active);
+      active.delete(key); seen.add(key);
+    };
+    const ticketEdges = key => {
+      const row = w.tickets.find(t => t.id === key);
+      const spec = key === id ? plan : row?.plan;
+      requireThat(spec, 'unknown-ticket', `Unknown upstream Ticket ${key}.`);
+      const map = key === id ? bindings : row.dependencyBindings;
+      return [...allRefs(spec, 'ticketDependencies'), ...allRefs(spec, 'ticketDependencySeries').map(s => ownValue(map, s)).filter(Boolean)];
+    };
+    if (id !== null) visit(id, ticketEdges, new Set(), new Set());
+    else for (const key of allRefs(plan, 'ticketDependencies')) visit(key, ticketEdges, new Set(), new Set());
+    const seriesEdges = key => {
+      const spec = key === seriesId ? plan : w.series?.find(s => s.id === key)?.plan;
+      requireThat(spec, 'unknown-series', `Unknown upstream series ${key}.`);
+      return allRefs(spec, 'ticketDependencySeries');
+    };
+    for (const key of allRefs(plan, 'ticketDependencySeries')) visit(key, seriesEdges, new Set(), new Set());
+  }
+  #dependencyReadiness(t, nodeId) {
+    const plan = t.execution && !['draft','stopped'].includes(t.status) ? this.#config(t).plan : t.plan;
+    const spec = nodeId === undefined ? plan : plan.nodes.find(n => n.id === nodeId);
+    requireThat(spec, 'unknown-node', 'Unknown dependency scope.');
+    const series = spec.ticketDependencySeries ?? [];
+    const waitingSeriesIds = series.filter(id => !ownValue(t.dependencyBindings, id));
+    const ticketIds = [...new Set([...(spec.ticketDependencies ?? []), ...series.map(id => ownValue(t.dependencyBindings, id)).filter(Boolean)])];
+    const pinned = nodeId !== undefined ? t.execution?.nodes[nodeId]?.dependencyInputs : t.execution?.dependencyInputs;
+    const waitingTicketIds = ticketIds.filter(id => !pinned?.some(input => input.ticketId === id) && !t.execution?.dependencyInputs?.some(input => input.ticketId === id) && this.#workspace(t.workspaceId).tickets.find(up => up.id === id)?.status !== 'delivered');
+    return { ready: !waitingSeriesIds.length && !waitingTicketIds.length, ticketIds, waitingTicketIds, waitingSeriesIds };
+  }
+  #upstreamInputs(t, ids) {
+    return ids.map(ticketId => {
+      const upstream = this.#ticket(t.workspaceId, ticketId), e = upstream.execution;
+      const frozen = this.#config(upstream).plan, receipt = e.delivery?.history?.slice(e.delivery.cycleStart ?? 0).at(-1);
+      const deliverables = (frozen?.deliverables ?? []).flatMap((item, index) => {
+        if (skippedItem(e, item)) return [];
+        const bound = receipt?.items?.find(it => it.deliverableIndex === index);
+        return [{ index, label: deliverableView(item).label, ...(bound ? { artifactId: bound.artifactId, version: bound.version, sha256: bound.sha256, snapshotPath: e.artifacts[bound.artifactId].versions.find(v => v.version === bound.version).snapshotPath } : { evidenceStatus: 'unbound' }) }];
+      });
+      return { ticketId, goal: frozen?.goal ?? upstream.plan.goal ?? '', deliverables, ...(receipt ? { deliveryId: receipt.id } : {}), ...(e.delivery?.override ? { overrideReason:e.delivery.override.reason } : {}) };
+    });
+  }
+  #dependencyStartReady(t) {
+    return t.status === 'draft' && !t.abandonedAt && t.dependencyAuthorization?.revision === t.revision && this.#dependencyReadiness(t).ready;
+  }
+  #startWhenReady(t, expectedRevision) {
+    if ((expectedRevision !== undefined && expectedRevision !== t.revision) || !this.#dependencyStartReady(t)) return copy(t);
+    return this.#start(t.workspaceId, t.id, { kind: 'system', via: 'dependencies', authorizedBy: t.dependencyAuthorization.actor });
+  }
+  #authorize(t, actor) {
+    if (t.dependencyAuthorization?.revision !== t.revision) {
+      this.#touch(t); t.dependencyAuthorization = { revision: t.revision, actor: copy(actor), time: now() };
+      this.#event(t, 'dependencies-enabled', actor);
+    }
+  }
   #config(t) { return t.execution.configurations[t.execution.currentConfigRevision]; }
   #definition(t, id, kind = 'nodes') { return this.#config(t).plan?.[kind]?.find(n => n.id === id) ?? t.execution[kind][id]?.legacyDefinition; }
   #node(t, id) { const n = t.execution?.nodes?.[id]; requireThat(n, 'unknown-node', 'Unknown Ticket Node.'); return n; }
@@ -284,9 +386,16 @@ export class FleetCore {
       const before = prior.nodes.find(n => n.id === id), after = next.nodes.find(n => n.id === id);
       if ((state.attempts.length || state.thread.length) && !after) fail('completed-work-conflict', `Node ${id} has execution or discussion history and must remain in this Ticket.`);
       if (state.status !== 'completed') continue;
-      requireThat(after && ['agentId', 'dependsOn', 'task'].every(k => isDeepStrictEqual(before[k], after[k])) && isDeepStrictEqual(prior.agents[before.agentId]?.profile, next.agents[after.agentId]?.profile), 'completed-work-conflict', `Editing Node ${id} would rewrite completed work.`);
+      requireThat(['ticketDependencies','ticketDependencySeries'].every(k => isDeepStrictEqual(prior[k], next[k])), 'completed-work-conflict', 'Whole-Ticket dependencies for completed work are frozen.');
+      requireThat(after && ['agentId', 'dependsOn', 'task', 'ticketDependencies', 'ticketDependencySeries'].every(k => isDeepStrictEqual(before[k], after[k])) && isDeepStrictEqual(prior.agents[before.agentId]?.profile, next.agents[after.agentId]?.profile), 'completed-work-conflict', `Editing Node ${id} would rewrite completed work.`);
+      const incoming = plan => (plan.logicGates ?? []).filter(g => g.routes.some(r => r.to.includes(id)));
+      requireThat(isDeepStrictEqual(incoming(prior), incoming(next)), 'completed-work-conflict', 'Editing incoming Logic Gates would rewrite completed work.');
       const beforeGates = prior.gates.filter(g => g.to.includes(id)), afterGates = next.gates.filter(g => g.to.includes(id));
       requireThat(isDeepStrictEqual(beforeGates, afterGates), 'completed-work-conflict', `Editing incoming Gates of completed Node ${id} requires explicit rework.`);
+    }
+    for (const [gateId] of Object.entries(t.execution.logicDecisions ?? {})) {
+      const before = prior.logicGates.find(g => g.id === gateId), after = next.logicGates?.find(g => g.id === gateId);
+      requireThat(isDeepStrictEqual(before, after), 'completed-work-conflict', 'An evaluated Logic Gate is frozen until its source is retried.');
     }
     for (const [id, g] of Object.entries(t.execution.gates)) {
       const before = prior.gates.find(g => g.id === id), after = next.gates.find(g => g.id === id);
@@ -302,12 +411,15 @@ export class FleetCore {
     if (!prior) {
       requireThat(expectedRevision === undefined, 'stale-revision', 'New Ticket must not specify expectedRevision.');
       const id = newId ?? randomUUID(); text(id, 'Ticket ID'); requireThat(!w.tickets.some(t => t.id === id), 'duplicate-id', 'Ticket ID already exists.');
+      this.#validateDependencies(w, id, data);
       const time = now(), t = { id, workspaceId: ws, originSessionId: sessionId, status: 'draft', revision: 1, createdAt: time, updatedAt: time, plan: data, execution: null, activity: [] };
       this.#event(t, 'ticket-created', actor); for (const source of sources) this.#event(t, 'template-applied', actor, source); w.tickets.push(t); return copy(t);
     }
+    this.#validateDependencies(w, prior.id, data, null, prior.dependencyBindings);
     this.#preserveCompleted(prior, data);
     if (isDeepStrictEqual(prior.plan, data) && !sources.length) return copy(prior);
     const before = copy(prior.plan), baseRevision = prior.revision;
+    delete prior.dependencyAuthorization;
     prior.plan = data; this.#touch(prior); this.#event(prior, 'plan-edited', actor, { paths: Object.keys(data).filter(k => !isDeepStrictEqual(before[k], data[k])).map(k => `plan.${k}`), before, after: copy(data), baseRevision }); for (const source of sources) this.#event(prior, 'template-applied', actor, source); return copy(prior);
   }
   instantiateTemplate(ws, { templateId, templateRevision, overrides, assignments = {}, sessionId = null, id, actor }) {
@@ -335,10 +447,13 @@ export class FleetCore {
   listSeries(ws) { return copy(this.#state.workspaces.find(w => w.id === ws)?.series ?? []); }
   readSeries(ws, id) { return copy(this.#series(ws, id)); }
   findSeriesForTicket(ws, id) { return this.listSeries(ws).find(s => s.sourceTicketId === id || s.occurrences.some(o => o.ticketId === id)) ?? null; }
-  createSeries(ws, { id = randomUUID(), name, plan, sourceTicketId = null, sourceTemplateId, sourceRefs, scheduleId, targetSessionId, timing, host, requestActor }) {
+  createSeries(ws, { id = randomUUID(), name, plan, sourceTicketId = null, sourceTemplateId, sourceRefs, scheduleId, targetSessionId, timing, host, requestActor, triggerSeriesId }) {
     const w = this.#workspace(ws, true), frozen = planInput(plan, { allowMissingVersion: false }); assertStart(frozen);
     text(id,'series id'); text(name,'series name'); text(scheduleId,'scheduleId'); text(targetSessionId,'targetSessionId');
-    requireThat(!w.series?.some(s => s.id === id || s.scheduleId === scheduleId), 'duplicate-id', 'Series or host schedule ID already exists.');
+    requireThat(!w.series?.some(s => s.id === id || (!triggerSeriesId && !s.triggerSeriesId && s.scheduleId === scheduleId)), 'duplicate-id', 'Series or host schedule ID already exists.');
+    const trigger = triggerSeriesId !== undefined ? this.#series(ws, triggerSeriesId) : null;
+    if (trigger) requireThat(trigger.scheduleId === scheduleId && allRefs(frozen,'ticketDependencySeries').includes(trigger.id), 'invalid-input', 'Follower must reference its trigger series and share its clock.');
+    this.#validateDependencies(w, null, frozen, id);
     if (sourceTicketId !== null) {
       const source = this.#ticket(ws, sourceTicketId);
       sourceRefs ??= this.#effectiveSources(source).map(({activityId,content,...ref}) => ref);
@@ -346,9 +461,11 @@ export class FleetCore {
     sourceRefs = this.#sources(frozen, sourceRefs ?? []);
     requireThat(isRecord(timing) && TIMING_KINDS.includes(timing.kind), 'invalid-input', 'Series needs the host schedule timing.');
     const time = now(), s = {id,workspaceId:ws,revision:1,name,plan:frozen,sourceTicketId,...(sourceTemplateId ? {sourceTemplateId} : {}),sourceRefs:copy(sourceRefs),scheduleId,targetSessionId,timing:copy(timing),status:'active',occurrences:[],createdAt:time,updatedAt:time,...(host ? {host:copy(host)} : {})};
+    if (trigger) { s.triggerSeriesId = trigger.id; s.triggerAfterCount = trigger.occurrences.length; }
     if (requestActor) {
       const source = this.#ticket(ws, sourceTicketId), sourceRevision = source.revision;
       this.#touch(source);
+      if (source.dependencyAuthorization?.revision === sourceRevision) source.dependencyAuthorization.revision = source.revision;
       this.#event(source, 'series-created', requestActor, {seriesId: id, scheduleId, sourceRevision});
     }
     (w.series ??= []).push(s); return copy(s);
@@ -358,7 +475,10 @@ export class FleetCore {
     requireThat(s.status !== 'ended', 'state-conflict', 'An ended series keeps its history; create a new series instead.');
     const plan = {...s.plan,...object(fields,'series plan fields')};
     for (const k of Object.keys(fields)) if (fields[k] === undefined) delete plan[k];
-    s.plan = planInput(plan, {allowMissingVersion:false}); this.#touch(s); return copy(s);
+    const next = planInput(plan, {allowMissingVersion:false});
+    if (s.triggerSeriesId) requireThat(allRefs(next,'ticketDependencySeries').includes(s.triggerSeriesId), 'invalid-input', 'A follower must retain its trigger series reference.');
+    this.#validateDependencies(this.#workspace(ws), null, next, id);
+    s.plan = next; this.#touch(s); return copy(s);
   }
   applySeriesChanges(ws,id,{before,after,expectedRevision}) {
     const s = this.#series(ws,id), fields = {};
@@ -367,6 +487,7 @@ export class FleetCore {
   }
   setSeriesStatus(ws,id,status) {
     requireThat(SERIES_STATUSES.includes(status),'invalid-input','Invalid series status.'); const s = this.#series(ws,id);
+    if (s.triggerSeriesId && s.status === 'paused' && status === 'active') s.triggerAfterCount = this.#series(ws,s.triggerSeriesId).occurrences.length;
     if (s.status !== status) { s.status = status; this.#touch(s); } return copy(s);
   }
   setSeriesHost(ws,id,host) { const s = this.#series(ws,id); s.host = copy(host); return copy(s); }
@@ -383,8 +504,31 @@ export class FleetCore {
     const t = this.#ticket(ws,draft.id);
     for (const ref of refs) this.#event(t,'template-applied',actor,ref);
     t.activity[0].detail = {seriesId:id,seriesRevision:s.revision,scheduleId:s.scheduleId,occurrenceAt,via:'schedule'};
-    this.#start(ws,t.id,actor);
-    s.occurrences.push({occurrenceAt,ticketId:t.id,status:'started',createdAt:now()}); s.updatedAt = now(); return {duplicate:false,ticketId:t.id};
+    s.occurrences.push({occurrenceAt,ticketId:t.id,status:'waiting',createdAt:now()});
+    if (this.#dependencyReadiness(t).ready) this.#start(ws,t.id,actor);
+    else this.#authorize(t,actor);
+    s.updatedAt = now(); return {duplicate:false,ticketId:t.id};
+  }
+  #bindOccurrence(t, bindings) {
+    const w = this.#workspace(t.workspaceId), series = w.series?.find(s => s.occurrences.some(o => o.ticketId === t.id));
+    requireThat(series, 'unknown-series', 'Binding requires a scheduled occurrence.');
+    if (!['draft','running'].includes(t.status) || t.abandonedAt) return copy(t);
+    const wanted = allRefs(t.plan, 'ticketDependencySeries');
+    const next = { ...t.dependencyBindings };
+    for (const [seriesId, upstreamId] of Object.entries(object(bindings, 'series bindings'))) {
+      requireThat(wanted.includes(seriesId) && this.#series(w.id, seriesId).occurrences.some(o => o.ticketId === upstreamId && upstreamId), 'invalid-input', 'Binding must refer to an occurrence of the configured series.');
+      requireThat(!Object.hasOwn(next,seriesId) || next[seriesId] === upstreamId, 'state-conflict', 'Occurrence binding is immutable.');
+      Object.defineProperty(next,seriesId,{value:upstreamId, enumerable:true, configurable:true, writable:true});
+    }
+    if (!isDeepStrictEqual(next, t.dependencyBindings ?? {})) {
+      this.#validateDependencies(w, t.id, t.plan, null, next);
+      t.dependencyBindings = next;
+      const authorized = t.dependencyAuthorization?.revision === t.revision;
+      this.#touch(t);
+      if (authorized) t.dependencyAuthorization.revision = t.revision;
+      this.#event(t, 'occurrence-bound', {kind:'system'}, {bindings: next});
+    }
+    return this.#startWhenReady(t);
   }
   recordOccurrenceFailure(ws,id,{occurrenceAt,error}) {
     const s = this.#series(ws,id), prior = s.occurrences.find(o => Date.parse(o.occurrenceAt) === Date.parse(occurrenceAt));
@@ -435,7 +579,10 @@ export class FleetCore {
     t.execution ??= { currentConfigRevision: revision, configurations: {}, nodes: {}, gates: {} };
     t.execution.currentConfigRevision = revision;
     t.execution.configurations[revision] = { frozenAt: now(), plan: copy(t.plan), rules, sourceRefs: this.#effectiveSources(t) };
-    for (const n of t.plan.nodes) t.execution.nodes[n.id] ??= { status: 'pending', attempts: [], thread: [] };
+    for (const n of t.plan.nodes) {
+      const state = t.execution.nodes[n.id] ??= { status: 'pending', attempts: [], thread: [] };
+      if (state.status === 'skipped') state.status = 'pending';
+    }
     for (const id of Object.keys(t.execution.nodes)) if (!t.plan.nodes.some(n => n.id === id) && !t.execution.nodes[id].attempts.length) delete t.execution.nodes[id];
     for (const g of t.plan.gates) {
       const existing = t.execution.gates[g.id];
@@ -448,13 +595,20 @@ export class FleetCore {
   // Shared retry/rework closure (P-47): archive affected Gates, reset the downstream closure and
   // open a new Attempt cycle. Manual retry and pre-approved rework both route through here.
   #retry(t, nodeIds, reason, actor) {
+    requireThat(nodeIds.length, 'state-conflict', 'Rework requires an executed source.');
     text(reason, 'retry reason'); requireThat(['running', 'stopped', 'delivered'].includes(t.status), 'state-conflict', 'Ticket is not ready for retry.');
     requireThat(!t.abandonedAt, 'state-conflict', 'Ticket is abandoned; reverse the abandonment before retrying.');
     requireThat(!t.execution.legacy?.readOnly, 'legacy-plan', 'Legacy execution needs explicit repair.');
     for (const nodeId of nodeIds) requireThat(['failed', 'cancelled', 'interrupted', 'completed'].includes(this.#node(t, nodeId).status), 'state-conflict', 'Node is not ready for retry.');
     assertStart(t.plan); this.#preserveCompleted(t, t.plan);
+    const { inputs } = this.#checkRunDependencies(t);
     const plan = t.plan, affected = new Set(nodeIds); let size;
-    do { size = affected.size; for (const v of plan.nodes) if (v.dependsOn.some(id => affected.has(id))) affected.add(v.id); for (const g of plan.gates) if (g.from.some(id => affected.has(id))) g.to.forEach(id => affected.add(id)); } while (affected.size !== size);
+    do {
+      size = affected.size;
+      for (const node of plan.nodes) if (node.dependsOn.some(id => affected.has(id))) affected.add(node.id);
+      for (const gate of plan.gates) if (gate.from.some(id => affected.has(id))) for (const id of gate.to) affected.add(id);
+      for (const gate of plan.logicGates ?? []) if (affected.has(gate.from)) for (const route of gate.routes) for (const id of route.to) affected.add(id);
+    } while (affected.size !== size);
     // An already-passed incoming Gate (upstream unaffected, only its target is retried) keeps its verdict:
     // the upstream delivery and review are unchanged, so retrying must not force a second human approval.
     const gates = plan.gates.filter(g => {
@@ -463,26 +617,105 @@ export class FleetCore {
       return touched && !keptIncoming;
     });
     requireThat([...affected].every(id => this.#node(t, id).status !== 'running') && gates.every(g => !inflight(this.#gate(t, g.id).dispatch)), 'state-conflict', 'Affected execution is still in flight.');
-    this.#freeze(t); for (const id of affected) this.#node(t, id).status = 'pending';
+    requireThat(!plan.logicGates?.length || !t.execution.delivery?.pending, 'state-conflict', 'Delivery is in progress.');
+    this.#freeze(t);
+    if (inputs.length || t.execution.dependencyInputs) t.execution.dependencyInputs = inputs;
+    for (const id of affected) this.#node(t, id).status = 'pending';
+    for (const g of plan.logicGates ?? []) if (affected.has(g.from) && t.execution.logicDecisions) delete t.execution.logicDecisions[g.id];
+    if (plan.logicGates?.length) {
+      const delivery = t.execution.delivery;
+      if (delivery) { delivery.cycleStart = delivery.history.length; delivery.override = null; }
+      for (const [index, item] of Object.entries(t.execution.deliverables ?? {})) if (affected.has(t.execution.artifacts?.[item.artifactId]?.nodeId)) delete t.execution.deliverables[index];
+    }
     for (const g of gates) this.#archiveGate(this.#gate(t, g.id), t.execution.currentConfigRevision, actor, reason);
     for (const nodeId of nodeIds) this.#node(t, nodeId).thread.push({ id: randomUUID(), time: now(), actor: copy(actor), intent: 'retry', text: reason });
-    t.status = 'running'; this.#touch(t); this.#event(t, 'node-retry-requested', actor, { nodeId: nodeIds[0], nodeIds: copy(nodeIds), reason, affectedNodes: [...affected] }); return copy(t);
+    t.status = 'running'; this.#advanceLogic(t); this.#touch(t); this.#event(t, 'node-retry-requested', actor, { nodeId: nodeIds[0], nodeIds: copy(nodeIds), reason, affectedNodes: [...affected] }); return copy(t);
+  }
+  #checkRunDependencies(t) {
+    const ws = t.workspaceId, id = t.id;
+    const occurrence = this.#workspace(ws).series?.flatMap(s => s.occurrences).find(o => o.ticketId === id);
+    requireThat(!allRefs(t.plan, 'ticketDependencySeries').length || occurrence, 'dependency-wait', 'Series references require a scheduled occurrence.');
+    this.#validateDependencies(this.#workspace(ws), id, t.plan, null, t.dependencyBindings);
+    const deps = this.#dependencyReadiness(t);
+    requireThat(deps.ready, 'dependency-wait', 'Upstream Tickets must be delivered before starting.');
+    const inputs = deps.ticketIds.map(id => t.execution?.dependencyInputs?.find(item => item.ticketId === id) ?? this.#upstreamInputs(t,[id])[0]);
+    return { inputs, occurrence };
   }
   #start(ws, id, actor, resume = false) {
     const t = this.#ticket(ws, id); requireThat(t.status === (resume ? 'stopped' : 'draft'), 'state-conflict', `Only a ${resume ? 'stopped' : 'draft'} Ticket can ${resume ? 'resume' : 'start'}.`);
     requireThat(!t.abandonedAt, 'state-conflict', 'Ticket is abandoned; reverse the abandonment before starting.');
+    const { inputs, occurrence } = this.#checkRunDependencies(t);
     this.#editable(t); this.#preserveCompleted(t, t.plan); this.#freeze(t);
+    if (inputs.length || t.execution.dependencyInputs) t.execution.dependencyInputs = inputs;
+    delete t.dependencyAuthorization;
+    if (occurrence) occurrence.status = 'started';
     for (const n of Object.values(t.execution.nodes)) if (n.status === 'cancelled') n.status = 'pending';
     if (resume) for (const g of Object.values(t.execution.gates)) if (g.status === 'pending' && g.dispatch?.phase === 'stopped') this.#archiveGate(g, t.execution.currentConfigRevision, actor, 'review resumed after stop');
     t.status = 'running'; this.#touch(t); this.#event(t, resume ? 'ticket-resumed' : 'ticket-started', actor, { configRevision: t.execution.currentConfigRevision }); this.#settle(t); return copy(t);
   }
-  #sourcesComplete(t, id) { return this.#definition(t, id, 'gates').from.every(n => this.#node(t, n).status === 'completed'); }
-  #runnable(t, id) { const n = this.#node(t, id), d = this.#definition(t, id); return t.status === 'running' && !t.execution.legacy?.readOnly && n.status === 'pending' && d.dependsOn.every(id => this.#node(t, id).status === 'completed') && this.#config(t).plan.gates.filter(g => g.to.includes(id)).every(g => this.#gate(t, g.id).status === 'passed' && this.#sourcesComplete(t, g.id)); }
+  #sourcesComplete(t, id) {
+    const states = this.#definition(t, id, 'gates').from.map(n => this.#node(t, n).status);
+    return states.includes('completed') && states.every(finishedNode) && this.#gate(t, id).status !== 'skipped';
+  }
+  #incomingRoutes(t, id) {
+    const matches = [];
+    for (const gate of this.#config(t).plan.logicGates ?? []) {
+      const decision = ownValue(t.execution.logicDecisions, gate.id);
+      for (const route of gate.routes) if (route.to.includes(id)) {
+        matches.push(this.#node(t, gate.from).status === 'skipped' ? false : decision?.routes.find(r => r.id === route.id)?.matched);
+      }
+    }
+    return matches;
+  }
+  #advanceLogic(t) {
+    if (t.status !== 'running' || !this.#config(t).plan?.logicGates?.length) return false;
+    const plan = this.#config(t).plan;
+    let changed = false, progress;
+    do {
+      progress = false;
+      for (const gate of plan.logicGates) {
+        const source = this.#node(t, gate.from), attempt = source.attempts.at(-1);
+        if (source.status !== 'completed' || ownValue(t.execution.logicDecisions, gate.id)) continue;
+        const decision = { gateId: gate.id, from: gate.from, attemptId: attempt.id, configRevision: t.execution.currentConfigRevision,
+          routes: gate.routes.map(route => ({ id: route.id, matched: matchesCondition(attempt.completion?.handoff, route.condition) })) };
+        (t.execution.logicDecisions ??= {})[gate.id] = decision;
+        this.#touch(t); this.#event(t, 'logic-gate-decided', { kind: 'system' }, decision); progress = true;
+      }
+      for (const d of plan.nodes) {
+        const n = this.#node(t, d.id);
+        if (n.status !== 'pending') continue;
+        const routes = this.#incomingRoutes(t, d.id);
+        if (routes.includes(undefined)) continue;
+        const parents = [...d.dependsOn, ...plan.gates.filter(g => g.to.includes(d.id)).flatMap(g => g.from)];
+        const skip = routes.length ? !routes.includes(true) : parents.length && parents.every(id => this.#node(t, id).status === 'skipped');
+        if (skip) {
+          n.status = 'skipped'; this.#touch(t); this.#event(t, 'node-skipped', { kind: 'system' }, { nodeId: d.id }); progress = true;
+        }
+      }
+      for (const d of plan.gates) {
+        const gate = this.#gate(t, d.id);
+        if (gate.status !== 'pending' || gate.dispatch) continue;
+        if (d.from.every(id => this.#node(t, id).status === 'skipped') || (d.to.length && d.to.every(id => this.#node(t, id).status === 'skipped'))) {
+          gate.status = 'skipped'; this.#touch(t); this.#event(t, 'gate-skipped', { kind: 'system' }, { gateId: d.id }); progress = true;
+        }
+      }
+      changed ||= progress;
+    } while (progress);
+    return changed;
+  }
+  #runnable(t, id) {
+    const n = this.#node(t, id), d = this.#definition(t, id);
+    if (t.status !== 'running' || t.execution.legacy?.readOnly || n.status !== 'pending') return false;
+    const routes = this.#incomingRoutes(t, id);
+    return (!routes.length || (!routes.includes(undefined) && routes.includes(true))) && d.dependsOn.every(id => finishedNode(this.#node(t, id).status))
+      && this.#config(t).plan.gates.filter(g => g.to.includes(id)).every(g => this.#gate(t, g.id).status === 'skipped' || (this.#gate(t, g.id).status === 'passed' && this.#sourcesComplete(t, g.id)))
+      && this.#dependencyReadiness(t, id).ready;
+  }
   // Derived Gate coverage (P-45); mirrors the model projection. Only 'stale' blocks delivery.
   #coverage(t, gateId, g) {
     if (g.status !== 'passed') return 'not-passed';
     if (g.humanOverride) return 'covered';
-    const from = this.#definition(t, gateId, 'gates').from;
+    const from = this.#definition(t, gateId, 'gates').from.filter(id => this.#node(t,id).status !== 'skipped');
     const arts = Object.entries(t.execution.artifacts ?? {}).filter(([, a]) => from.includes(a.nodeId));
     if (!arts.length) return 'covered'; // legacy passed Gate without bindings stays compatible
     const refs = (g.reviews ?? []).filter(r => r.decision === 'passed' && r.cycle === g.cycle).flatMap(r => r.artifactRefs ?? []);
@@ -495,12 +728,13 @@ export class FleetCore {
     if (!declared.length) return true;
     if (t.execution.delivery?.override) return true;
     const registry = t.execution.deliverables ?? {}, history = t.execution.delivery?.history ?? [];
-    return declared.every((_, i) => registry[String(i)]?.artifactId && history.some(h => (h.items ?? []).some(it => it.deliverableIndex === i)));
+    return declared.every((item, i) => skippedItem(t.execution, item) || (registry[String(i)]?.artifactId && history.slice(t.execution.delivery?.cycleStart ?? 0).some(h => (h.items ?? []).some(it => it.deliverableIndex === i))));
   }
   #settle(t) {
+    this.#advanceLogic(t);
     if (t.status === 'stop-requested') {
       if (!Object.values(t.execution.nodes).some(n => n.status === 'running') && !Object.values(t.execution.gates).some(g => inflight(g.dispatch))) { t.status = 'stopped'; this.#event(t, 'ticket-stopped', { kind: 'system' }); }
-    } else if (t.status === 'running' && Object.values(t.execution.nodes).every(n => n.status === 'completed') && Object.values(t.execution.gates).every(g => g.status === 'passed')) {
+    } else if (t.status === 'running' && Object.values(t.execution.nodes).every(n => finishedNode(n.status)) && Object.values(t.execution.gates).every(g => finishedGate(g.status))) {
       const override = t.execution.delivery?.override;
       if (!override && Object.entries(t.execution.gates).some(([id, g]) => this.#coverage(t, id, g) === 'stale')) return;
       if (!this.#deliveryReady(t)) return;
@@ -514,7 +748,7 @@ export class FleetCore {
     const active = () => requireThat(n.status === 'running' && attempt.status === 'running' && n.attempts.at(-1) === attempt, 'stale-attempt', 'Attempt is no longer active.');
     const finish = (status, detail = {}) => { active(); Object.assign(attempt, detail, { status, finishedAt: now() }); n.status = status === 'stopped' ? 'cancelled' : status; this.#touch(t); this.#event(t, `node-${status}`, actor, { nodeId, attemptId: attempt.id }); this.#settle(t); return copy(attempt); };
     return Object.freeze({ attemptId: attempt.id,
-      input: () => { active(); return copy({ task: definition.task, configRevision: attempt.configRevision, profile: { id: agentId, ...frozen.plan.agents[agentId] }, modelSelection: definition.modelSelection ?? null, inputs: frozen.plan.inputs, rules: frozen.rules }); },
+      input: () => { active(); return copy({ task: definition.task, configRevision: attempt.configRevision, profile: { id: agentId, ...frozen.plan.agents[agentId] }, modelSelection: definition.modelSelection ?? null, inputs: frozen.plan.inputs, rules: frozen.rules, ...(attempt.upstreamTickets ? {upstreamTickets:attempt.upstreamTickets} : {}) }); },
       attachSession: sessionId => { active(); text(sessionId, 'Session ID'); requireThat(!attempt.sessionId || attempt.sessionId === sessionId, 'state-conflict', 'Attempt already has another Session.');
         const owner = this.sessionOwner(sessionId); requireThat(!owner || owner.attemptId === attempt.id, 'session-conflict', 'Session already belongs to another execution context.');
         if (attempt.sessionId === sessionId) return sessionId; attempt.sessionId = sessionId; if (attempt.dispatch) attempt.dispatch.sessionId = sessionId; this.#touch(t); return sessionId; },
@@ -595,6 +829,19 @@ export class FleetCore {
     const actor = { kind: 'human', userId: text(userId, 'user ID') };
     return Object.freeze({
       start: id => this.#start(ws, id, actor), resume: id => this.#start(ws, id, actor, true),
+      enableDependencies: (id, expectedRevision) => {
+        const t = this.#ticket(ws, id); this.#cas(t, expectedRevision);
+        requireThat(t.status === 'draft' && !t.abandonedAt, 'control-locked', 'Only an active draft can enable automatic start.');
+        requireThat(t.plan.ticketDependencies?.length || t.plan.ticketDependencySeries?.length, 'invalid-input', 'Automatic start requires whole-Ticket dependencies.');
+        requireThat(!allRefs(t.plan, 'ticketDependencySeries').length || this.#workspace(ws).series?.some(s => s.occurrences.some(o => o.ticketId === id)), 'dependency-wait', 'Series references require a scheduled occurrence.');
+        assertStart(t.plan); this.#validateDependencies(this.#workspace(ws), id, t.plan, null, t.dependencyBindings);
+        this.#authorize(t, actor); return this.#startWhenReady(t);
+      },
+      disableDependencies: (id, expectedRevision) => {
+        const t = this.#ticket(ws, id); this.#cas(t, expectedRevision);
+        if (t.dependencyAuthorization) { delete t.dependencyAuthorization; this.#touch(t); this.#event(t, 'dependencies-disabled', actor); }
+        return copy(t);
+      },
       // P-69: the user explicitly abandons this one Ticket. Series schedules are untouched;
       // future occurrences keep creating their own Tickets from the frozen series plan.
       abandonTicket: (id, expectedRevision, reason) => {
@@ -602,7 +849,7 @@ export class FleetCore {
         requireThat(['draft', 'stopped'].includes(t.status), 'control-locked', 'Only a draft or stopped Ticket can be abandoned; stop a running Ticket first.');
         if (reason !== undefined && reason !== null) text(reason, 'reason');
         if (t.abandonedAt) return copy(t);
-        t.abandonedAt = now(); this.#touch(t); this.#event(t, 'ticket-abandoned', actor, reason ? { reason } : {}); return copy(t);
+        delete t.dependencyAuthorization; t.abandonedAt = now(); this.#touch(t); this.#event(t, 'ticket-abandoned', actor, reason ? { reason } : {}); return copy(t);
       },
       unabandonTicket: (id, expectedRevision) => {
         const t = this.#ticket(ws, id); this.#cas(t, expectedRevision);
@@ -634,13 +881,13 @@ export class FleetCore {
       deliverOverride: (id, reason) => {
         const t = this.#ticket(ws, id); text(reason, 'reason'); requireThat(t.status === 'running', 'state-conflict', 'Ticket is not running.');
         const declared = this.#config(t).plan.deliverables ?? [], registry = t.execution.deliverables ?? {};
-        const gaps = { unbound: declared.map((item, i) => registry[String(i)]?.artifactId ? null : { index: i, label: deliverableView(item).label }).filter(Boolean), staleGates: Object.entries(t.execution.gates).filter(([gid, g]) => this.#coverage(t, gid, g) === 'stale').map(([gid]) => gid) };
+        const gaps = { unbound: declared.map((item, i) => registry[String(i)]?.artifactId || skippedItem(t.execution,item) ? null : { index: i, label: deliverableView(item).label }).filter(Boolean), staleGates: Object.entries(t.execution.gates).filter(([gid, g]) => this.#coverage(t, gid, g) === 'stale').map(([gid]) => gid) };
         t.execution.delivery ??= { history: [], override: null };
         t.execution.delivery.override = { id: randomUUID(), time: now(), actor: copy(actor), reason, gaps };
         this.#touch(t); this.#event(t, 'delivery-override', actor, { overrideId: t.execution.delivery.override.id, reason, gaps }); this.#settle(t); return copy(t.execution.delivery.override);
       },
       reviewGate: (id, gateId, decision, evidence) => { const t = this.#ticket(ws, id); requireThat(this.#definition(t, gateId, 'gates').reviewer.kind === 'human', 'not-reviewable', 'Gate requires its configured reviewer.'); return this.#review(t, gateId, actor, decision, evidence); },
-      forcePassGate: (id, gateId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId); requireThat(t.status === 'running', 'not-running', 'Ticket is not running.'); if (g.humanOverride) return copy(g); this.#touch(t); g.humanOverride = { id: randomUUID(), time: now(), actor: copy(actor), priorStatus: g.status, decision: 'passed', configRevision: g.configRevision, cycle: g.cycle }; g.status = 'passed'; this.#event(t, 'gate-human-override', actor, { gateId, overrideId: g.humanOverride.id }); this.#settle(t); return copy(g); },
+      forcePassGate: (id, gateId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId); requireThat(t.status === 'running' && g.status !== 'skipped', 'not-running', 'Gate is not active.'); if (g.humanOverride) return copy(g); this.#touch(t); g.humanOverride = { id: randomUUID(), time: now(), actor: copy(actor), priorStatus: g.status, decision: 'passed', configRevision: g.configRevision, cycle: g.cycle }; g.status = 'passed'; this.#event(t, 'gate-human-override', actor, { gateId, overrideId: g.humanOverride.id }); this.#settle(t); return copy(g); },
       repairTicket: (id, expectedRevision, replacement) => {
         const t = this.#ticket(ws, id); this.#cas(t, expectedRevision); requireThat(['draft', 'stopped'].includes(t.status), 'control-locked', 'Stop completely before repairing.');
         requireThat(!isCurrentPlan(t.plan) || t.legacy, 'state-conflict', 'Ticket already uses the current plan contract.');
@@ -655,7 +902,7 @@ export class FleetCore {
       regenerateTicket: (id, expectedRevision, replacement, originSessionId) => {
         const old = this.#ticket(ws, id); this.#cas(old, expectedRevision); requireThat(old.status === 'draft' && !old.execution && !old.abandonedAt, 'control-locked', 'Only an active unstarted Ticket can be regenerated.');
         const nextPlan = planInput(replacement); const fresh = this.saveDraftTicket(ws, { sessionId: old.originSessionId ?? (originSessionId === undefined ? null : text(originSessionId, 'origin Session ID')), plan: nextPlan, actor });
-        old.status = 'superseded'; old.supersededBy = fresh.id; this.#touch(old); this.#event(old, 'ticket-superseded', actor, { supersededBy: fresh.id, original: archived(old.plan, 'pre-regeneration-plan') }); return fresh;
+        delete old.dependencyAuthorization; old.status = 'superseded'; old.supersededBy = fresh.id; this.#touch(old); this.#event(old, 'ticket-superseded', actor, { supersededBy: fresh.id, original: archived(old.plan, 'pre-regeneration-plan') }); return fresh;
       },
       replaceRootAgent: (id, profile) => this.#replaceTemplate(id, this.#templateContent('agent', { ...this.#template(id, 'agent').content, profile: copy(object(profile, 'profile')) }), actor),
       replaceRootOrchestration: (id, definition) => this.#replaceTemplate(this.#template(id, 'orchestration').id, this.#templateContent('orchestration', definition), actor),
@@ -682,14 +929,14 @@ export class FleetCore {
     if (isObj && Array.isArray(evidence.artifactRefs)) {
       bindingKind = 'explicit'; artifactRefs = evidence.artifactRefs.map(ref => {
         object(ref, 'artifactRef'); requireThat(Object.keys(ref).every(k => ['artifactId', 'version', 'sha256'].includes(k)), 'invalid-input', 'Unexpected artifactRef field.');
-        const a = artifacts[ref.artifactId]; requireThat(a, 'invalid-input', 'Unknown review artifactRef.');
+        const a = artifacts[ref.artifactId]; requireThat(a && this.#node(t,a.nodeId).status !== 'skipped', 'invalid-input', 'Unknown or skipped review artifactRef.');
         const v = a.versions.find(v => v.version === ref.version); requireThat(v, 'invalid-input', 'Unknown review artifact version.');
         requireThat(v.sha256 === ref.sha256, 'invalid-input', 'Review artifactRef sha256 mismatch.');
         return { artifactId: ref.artifactId, version: ref.version, sha256: ref.sha256 };
       });
     } else {
       bindingKind = 'auto-latest';
-      artifactRefs = Object.entries(artifacts).filter(([, a]) => definition.from.includes(a.nodeId)).map(([artifactId, a]) => { const lv = a.versions.at(-1); return lv ? { artifactId, version: lv.version, sha256: lv.sha256 } : null; }).filter(Boolean);
+      artifactRefs = Object.entries(artifacts).filter(([, a]) => definition.from.includes(a.nodeId) && this.#node(t,a.nodeId).status !== 'skipped').map(([artifactId, a]) => { const lv = a.versions.at(-1); return lv ? { artifactId, version: lv.version, sha256: lv.sha256 } : null; }).filter(Boolean);
     }
     let findings = [];
     if (typeof evidence === 'string') findings = [{ id: randomUUID(), severity: 'medium', description: evidence }];
@@ -705,35 +952,45 @@ export class FleetCore {
     const g = this.#gate(t, gateId), definition = this.#definition(t, gateId, 'gates');
     requireThat((t.status === 'running' || g.humanOverride) && this.#sourcesComplete(t, gateId), 'not-reviewable', 'Gate is not ready for review.');
     requireThat(['passed', 'returned'].includes(decision) && evidence !== undefined, 'invalid-input', 'Review needs a decision and evidence.');
-    if (decision === 'passed' && !g.humanOverride && definition.requireEvidence) requireThat(definition.from.every(id => this.#node(t, id).attempts.at(-1)?.completion), 'evidence-required', 'Gate requires structured completion evidence from every upstream Node.');
+    if (decision === 'passed' && !g.humanOverride && definition.requireEvidence) requireThat(definition.from.every(id => this.#node(t, id).status === 'skipped' || this.#node(t, id).attempts.at(-1)?.completion), 'evidence-required', 'Gate requires structured completion evidence from every upstream Node.');
     const { findings, artifactRefs, bindingKind } = this.#reviewBindings(t, gateId, evidence);
     const row = { id: randomUUID(), time: now(), actor: copy(actor), decision, evidence: copy(evidence), findings, artifactRefs, bindingKind, configRevision: g.configRevision, cycle: g.cycle, supersededByHuman: Boolean(g.humanOverride) };
     g.reviews.push(row); if (!g.humanOverride) g.status = decision; this.#touch(t); this.#event(t, 'gate-review', actor, { gateId, reviewId: row.id }); this.#settle(t); return copy(g);
   }
   runtime(ws) {
     return Object.freeze({
+      dependencyReadiness: (id, nodeId) => this.#dependencyReadiness(this.#ticket(ws, id), nodeId),
+      dependencyStartReady: id => this.#dependencyStartReady(this.#ticket(ws,id)),
+      startWhenReady: (id, expectedRevision) => this.#startWhenReady(this.#ticket(ws,id), expectedRevision),
+      bindOccurrence: (id, bindings) => this.#bindOccurrence(this.#ticket(ws,id), bindings),
+      gateReady: (id, gateId) => this.#sourcesComplete(this.#ticket(ws,id), gateId),
+      advanceLogic: id => { const t = this.#ticket(ws,id); const changed = this.#advanceLogic(t); if (changed) this.#settle(t); return changed; },
       runnable: id => { const t = this.#ticket(ws, id); return Object.keys(t.execution?.nodes ?? {}).filter(n => this.#runnable(t, n)); },
-      claimNode: (id, nodeId) => { const t = this.#ticket(ws, id), n = this.#node(t, nodeId); requireThat(this.#runnable(t, nodeId), 'not-runnable', 'Node is not ready for dispatch.'); const attempt = { id: randomUUID(), configRevision: t.execution.currentConfigRevision, startedAt: now(), sessionId: null, status: 'running' }; n.attempts.push(attempt); n.status = 'running'; this.#touch(t); this.#event(t, 'node-claimed', { kind: 'system' }, { nodeId, attemptId: attempt.id }); return this.#worker(ws, t, nodeId, attempt); },
+      claimNode: (id, nodeId) => { const t = this.#ticket(ws, id), n = this.#node(t, nodeId); requireThat(this.#runnable(t, nodeId), 'not-runnable', 'Node is not ready for dispatch.'); const attempt = { id: randomUUID(), configRevision: t.execution.currentConfigRevision, startedAt: now(), sessionId: null, status: 'running' }; const scoped = this.#dependencyReadiness(t, nodeId).ticketIds;
+        if (scoped.length || n.dependencyInputs) n.dependencyInputs = scoped.map(id => n.dependencyInputs?.find(input => input.ticketId === id) ?? t.execution.dependencyInputs?.find(input => input.ticketId === id) ?? this.#upstreamInputs(t,[id])[0]);
+        const inputs = new Map([...(t.execution.dependencyInputs ?? []), ...(n.dependencyInputs ?? [])].map(input => [input.ticketId, input]));
+        if (inputs.size) attempt.upstreamTickets = copy([...inputs.values()]);
+        n.attempts.push(attempt); n.status = 'running'; this.#touch(t); this.#event(t, 'node-claimed', { kind: 'system' }, { nodeId, attemptId: attempt.id }); return this.#worker(ws, t, nodeId, attempt); },
       resumeNode: (id, nodeId, attemptId) => { const t = this.#ticket(ws, id), n = this.#node(t, nodeId), a = n.attempts.at(-1); requireThat(['running', 'stop-requested'].includes(t.status) && n.status === 'running' && a?.status === 'running' && a.id === attemptId, 'stale-attempt', 'Attempt is no longer active.'); return this.#worker(ws, t, nodeId, a); },
       recordGateDispatch: (id, gateId, data, expectedRequestId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId), d = this.#dispatch(data); requireThat(t.status === 'running' || g.dispatch || g.humanOverride, 'not-running', 'Gate is no longer active.'); requireThat(t.status !== 'stopped' || !inflight(d), 'not-running', 'Stopped Ticket cannot dispatch.'); requireThat(this.#definition(t, gateId, 'gates').reviewer.kind === 'agent' && this.#sourcesComplete(t, gateId), 'not-reviewable', 'Gate is not ready.'); if (expectedRequestId === null) requireThat(!g.dispatch, 'stale-dispatch', 'Gate is already claimed.'); else if (expectedRequestId !== undefined) requireThat(g.dispatch?.requestId === expectedRequestId, 'stale-dispatch', 'Gate dispatch changed.'); if (d.sessionId && d.sessionId !== g.dispatch?.sessionId) requireThat(!this.sessionOwner(d.sessionId), 'session-conflict', 'Review Session is already owned.'); if (!g.dispatch && d.phase === 'created') g.configRevision = t.execution.currentConfigRevision; g.dispatch = d; this.#touch(t); this.#settle(t); return copy(d); },
       reviewer: (id, gateId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId), definition = this.#definition(t, gateId, 'gates'); requireThat(definition.reviewer.kind === 'agent' && this.#sourcesComplete(t, gateId), 'not-reviewable', 'Gate is not ready for Agent review.'); const node = this.#definition(t, definition.reviewer.nodeId), cycle = g.cycle; let submitted = false; return Object.freeze({ submit: (decision, evidence) => { requireThat(cycle === g.cycle, 'stale-review', 'Review belongs to another cycle.'); requireThat(!submitted, 'duplicate-review', 'Review already submitted.'); const result = this.#review(t, gateId, { kind: 'agent-reviewer', nodeId: node.id, agentId: node.agentId }, decision, evidence); submitted = true; return result; } }); },
       // P-46 delivery settlement: pending export, recorded delivery and the human override exit.
       deliveryPending: id => {
         const t = this.#ticket(ws, id);
-        if (t.status !== 'running' || !Object.values(t.execution.nodes).every(n => n.status === 'completed') || !Object.values(t.execution.gates).every(g => g.status === 'passed')) return null;
+        if (t.status !== 'running' || !Object.values(t.execution.nodes).every(n => finishedNode(n.status)) || !Object.values(t.execution.gates).every(g => finishedGate(g.status))) return null;
         if (Object.entries(t.execution.gates).some(([gid, g]) => this.#coverage(t, gid, g) === 'stale')) return null;
         const declared = this.#config(t).plan.deliverables ?? [];
-        if (!declared.length || t.execution.delivery?.override || t.execution.delivery?.history?.length || t.execution.delivery?.pending) return null;
+        if (!declared.length || t.execution.delivery?.override || t.execution.delivery?.history?.slice(t.execution.delivery?.cycleStart ?? 0).length || t.execution.delivery?.pending) return null;
         const registry = t.execution.deliverables ?? {};
-        if (!declared.every((_, i) => registry[String(i)]?.artifactId)) return null;
-        const items = declared.map((_, i) => { const artifactId = registry[String(i)].artifactId, lv = t.execution.artifacts[artifactId].versions.at(-1); return { deliverableIndex: i, artifactId, version: lv.version, sha256: lv.sha256, snapshotPath: lv.snapshotPath }; });
+        if (!declared.every((item, i) => skippedItem(t.execution,item) || registry[String(i)]?.artifactId)) return null;
+        const items = declared.flatMap((item, i) => { if (skippedItem(t.execution,item)) return []; const artifactId = registry[String(i)].artifactId, lv = t.execution.artifacts[artifactId].versions.at(-1); return { deliverableIndex: i, artifactId, version: lv.version, sha256: lv.sha256, snapshotPath: lv.snapshotPath }; });
         return { ticketId: id, target: this.#config(t).plan.inputs?.deliveryTarget ?? null, items };
       },
       // Durable delivery intent (P-46): persisted before any byte export so a restart can reconcile
       // by receipt without re-delivering. Optional; old Tickets never carry it.
       recordDeliveryIntent: (id, data) => {
         const t = this.#ticket(ws, id); object(data, 'delivery intent'); requireThat(t.status === 'running', 'state-conflict', 'Ticket is not running.');
-        requireThat(!t.execution.delivery?.pending && !t.execution.delivery?.history?.length && !t.execution.delivery?.override, 'state-conflict', 'Delivery is already in progress or recorded.');
+        requireThat(!t.execution.delivery?.pending && !t.execution.delivery?.history?.slice(t.execution.delivery?.cycleStart ?? 0).length && !t.execution.delivery?.override, 'state-conflict', 'Delivery is already in progress or recorded.');
         const deliveryId = text(data.deliveryId, 'deliveryId');
         t.execution.delivery ??= { history: [], override: null };
         t.execution.delivery.pending = { id: deliveryId, time: now(), target: data.target ?? null, items: copy(data.items ?? []), gateRefs: copy(data.gateRefs ?? []) };
@@ -760,7 +1017,8 @@ export class FleetCore {
           const isAgent = definition.reviewer.kind === 'agent';
           if (isAgent && (g.autoReworkRounds ?? 0) >= rework.maxRounds) continue;
           const findings = (g.reviews ?? []).filter(r => r.decision === 'returned' && r.cycle === g.cycle).flatMap(r => r.findings ?? []);
-          due.push({ gateId, targetNodes: copy(rework.targetNodes ?? definition.from), findings, autoRound: isAgent });
+          const targetNodes = (rework.targetNodes ?? definition.from).filter(id => this.#node(t,id).status !== 'skipped');
+          if (targetNodes.length) due.push({ gateId, targetNodes, findings, autoRound: isAgent });
         }
         return due;
       },
@@ -770,7 +1028,7 @@ export class FleetCore {
         const rework = definition.rework; requireThat(rework && rework.maxRounds > 0, 'state-conflict', 'Gate has no enabled rework policy.');
         const isAgent = definition.reviewer.kind === 'agent';
         if (isAgent) requireThat((g.autoReworkRounds ?? 0) < rework.maxRounds, 'state-conflict', 'Rework budget is exhausted.');
-        const targetNodes = rework.targetNodes ?? definition.from;
+        const targetNodes = (rework.targetNodes ?? definition.from).filter(id => this.#node(t,id).status !== 'skipped');
         const findings = (g.reviews ?? []).filter(r => r.decision === 'returned' && r.cycle === g.cycle).flatMap(r => r.findings ?? []);
         const actor = { kind: 'system' }, reason = `Gate ${gateId} returned; pre-approved rework. Findings: ${JSON.stringify(findings)}`;
         this.#retry(t, targetNodes, reason, actor);

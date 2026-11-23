@@ -14,13 +14,13 @@ oh-my-dsh-fleet is a multi-agent workflow plugin for DeepSeek Harness (DSH). Run
 
 | Plugin | DeepSeek Harness | Check the host version |
 | --- | --- | --- |
-| `oh-my-dsh-fleet@0.11.0` | **`0.2.2-rc.5`** | Run `dsh --version` for the CLI. Desktop uses its bundled Harness. |
+| `oh-my-dsh-fleet@0.12.0` | **`0.2.2-rc.5`** | Run `dsh --version` for the CLI. Desktop uses its bundled Harness. |
 
 | Source | Desktop · Plugins → Add plugin | CLI · Replace `web` with your Profile |
 | --- | --- | --- |
-| **GitHub Release** | Download [`oh-my-dsh-fleet-0.11.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.11.0/oh-my-dsh-fleet-0.11.0.tgz) and enter its absolute path. | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scripts` |
+| **GitHub Release** | Download [`oh-my-dsh-fleet-0.12.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.12.0/oh-my-dsh-fleet-0.12.0.tgz) and enter its absolute path. | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scripts` |
 | **GitHub repository** | Paste `https://github.com/ohmyskyhigh/oh-my-dsh-fleet` to install the default branch. | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.11.0)** | Enter `oh-my-dsh-fleet@0.11.0`. | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.11.0` |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.12.0)** | Enter `oh-my-dsh-fleet@0.12.0`. | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.12.0` |
 
 Enable the plugin after installing and restart the app or CLI Profile if prompted. Open **oh-my-dsh-fleet** from the sidebar, enable Fleet for the target Workspace, and send `/fleet help` in a chat within that Workspace.
 
@@ -30,7 +30,7 @@ The previous package was `@dsh-fleet/shell`. Wait for active work to stop before
 
 ```sh
 dsh plugin --profile web remove @dsh-fleet/shell
-dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scripts
+dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scripts
 ```
 
 Use the same Workspace folders and Fleet data location. Existing Tickets, templates, schedules, and `/fleet` commands carry over. [Previous release](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8)
@@ -55,6 +55,12 @@ Set different review gates on different branches of the same Ticket. Reviews ref
 | --- | --- |
 | Give a reviewer specific inputs and checks, plus its own model, skills, and tools. | Open the review materials to approve the work or return it with feedback. |
 | ![Agent review inputs, checklist, and planned capabilities](.github/assets/fleet-agent-gate.png) | ![Human review with a versioned file and approve and return controls](.github/assets/fleet-ticket-flow.png) |
+
+### Ticket dependencies and Logic Gates
+
+In **Edit draft → Upstream dependencies and conditional routes**, select upstream Tickets for the entire Ticket or for individual steps in the same Workspace. Save the draft, then choose **Enable start after upstream delivery** if you want the whole Ticket to start automatically. Step dependencies let independent work proceed while a step waits. For recurring work, match upstream series per occurrence or choose **Follow upstream series** to run when a selected upstream series produces an occurrence.
+
+Use **Add logic gate** to route work based on structured handoff fields from an earlier step. Every matching route runs. You can make a deliverable required only when its producing step runs. See the [Fleet user reference](docs/usage.md#coordinate-tickets-and-route-work) for the setup steps.
 
 ### Templates and recurring operations
 

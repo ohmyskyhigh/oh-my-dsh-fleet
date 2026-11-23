@@ -78,7 +78,16 @@ export function validateWorkspaceState(value) {
     if (state.binding !== null && !record(state.binding)) fail('binding must be an object or null');
   } else if (state.schemaVersion === 2) {
     keys(state, ['schemaVersion', 'id', 'tickets', ...['legacy','series'].filter(k => Object.hasOwn(state,k))], 'workspace state');
-    if (Object.hasOwn(state, 'series')) { uniqueRecords(state.series, 'series'); for (const s of state.series) assertSeriesShape(s, state.id); }
+    if (Object.hasOwn(state, 'series')) {
+      uniqueRecords(state.series, 'series');
+      for (const series of state.series) {
+        assertSeriesShape(series, state.id);
+        if (series.triggerSeriesId) {
+          const trigger = state.series.find(s => s.id === series.triggerSeriesId);
+          if (!trigger || trigger.scheduleId !== series.scheduleId || series.triggerAfterCount > trigger.occurrences.length) fail('invalid follower series trigger');
+        }
+      }
+    }
   } else fail('unsupported workspace schemaVersion');
   id(state.id, 'workspace id');
   uniqueRecords(state.tickets, 'tickets');

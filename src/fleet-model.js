@@ -164,7 +164,7 @@ export function normalizePlan(input, { allowMissingVersion = true } = {}) {
   if ('ticket' in input || 'binding' in input || 'orchestration' in input || Array.isArray(input.agents)) fail('legacy-plan', 'Legacy plans require explicit repair or regeneration.');
   if (input.contractVersion !== PLAN_CONTRACT_VERSION && !(allowMissingVersion && input.contractVersion === undefined)) fail('unsupported-contract', 'Unknown plan contractVersion; repair or regenerate explicitly.');
   const plan = clone(input);
-  const allowed = ['contractVersion', 'goal', 'title', 'inputs', 'deliverables', 'criteria', 'requirements', 'agents', 'nodes', 'gates'];
+  const allowed = ['contractVersion', 'goal', 'title', 'inputs', 'deliverables', 'criteria', 'requirements', 'agents', 'nodes', 'gates', 'ticketDependencies', 'ticketDependencySeries', 'logicGates'];
   if (Object.keys(plan).some(key => !allowed.includes(key))) fail('invalid-input', 'Unexpected plan field.');
   plan.contractVersion = PLAN_CONTRACT_VERSION;
   // Title is a cosmetic display name, distinct from goal; empty/invalid means "unset" (fall back to goal).
@@ -193,8 +193,9 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
     const p = `deliverables[${index}]`;
     if (typeof item === 'string') continue;
     if (!record(item)) { add(p, 'Deliverable must be text or a {text,title?,description?,criteria?,category?,files?} object.'); continue; }
-    if (Object.keys(item).some(key => !['text', 'title', 'description', 'criteria', 'category', 'files'].includes(key))) add(p, 'Unexpected deliverable field.');
+    if (Object.keys(item).some(key => !['text', 'title', 'description', 'criteria', 'category', 'files', 'whenNodeRuns'].includes(key))) add(p, 'Unexpected deliverable field.');
     if (typeof item.text !== 'string' || !item.text.trim()) add(`${p}.text`, 'Deliverable object needs nonempty text (the full agent spec).');
+    if (item.whenNodeRuns !== undefined && !identity(item.whenNodeRuns)) add(p, 'Expected a conditional deliverable Node ID.');
     for (const key of ['title', 'description']) if (item[key] !== undefined && (typeof item[key] !== 'string' || !item[key].trim())) add(`${p}.${key}`, `${key} must be nonempty text.`);
     if (item.criteria !== undefined && (!Array.isArray(item.criteria) || !item.criteria.every(v => typeof v === 'string'))) add(`${p}.criteria`, 'criteria must be a string array.');
     if (item.category !== undefined && !['code', 'noncode', 'other'].includes(item.category)) add(`${p}.category`, 'category must be code, noncode or other.');
@@ -221,11 +222,19 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
     for (const key of ['model', 'provider', 'parameters', 'temperature', 'maxTokens', 'reasoningEffort']) if (agent.profile[key] !== undefined) add(`agents.${id}.profile.${key}`, `Custom profile.${key} is not supported; use profile.modelSelection or agentPreset.`, 'unsupported-profile', true);
     if (agent.profile.modelSelection !== undefined) validateModelSelection(agent.profile.modelSelection, `agents.${id}.profile.modelSelection`, (path, message, code) => add(path, message, code, true));
   }
+  const dependencyFields = (part, prefix) => {
+    for (const key of ['ticketDependencies', 'ticketDependencySeries']) {
+      const refs = part[key];
+      if (refs !== undefined && (!Array.isArray(refs) || !refs.every(v => typeof v === 'string' && v.trim()) || new Set(refs).size !== refs.length)) add(prefix + key, 'Expected unique upstream IDs.');
+    }
+  };
+  dependencyFields(plan, '');
   const ids = new Set(), gateIds = new Set();
   for (const [index, node] of plan.nodes.entries()) {
     const p = `nodes[${index}]`;
     if (!record(node) || !identity(node.id)) { add(p, 'Invalid Node identity.'); continue; }
-    if (Object.keys(node).some(key => !['id', 'agentId', 'role', 'dependsOn', 'task', 'modelSelection'].includes(key))) add(p, 'Unexpected plan Node field; execution facts do not belong in plan.');
+    if (Object.keys(node).some(key => !['id', 'agentId', 'role', 'dependsOn', 'task', 'modelSelection', 'ticketDependencies', 'ticketDependencySeries'].includes(key))) add(p, 'Unexpected plan Node field; execution facts do not belong in plan.');
+    dependencyFields(node, p + '.');
     if (ids.has(node.id)) add(p, 'Duplicate Node identity.'); ids.add(node.id);
     if (node.agentId !== null && !identity(node.agentId)) add(`${p}.agentId`, 'agentId must be a local ID or null.');
     if (node.role !== undefined && typeof node.role !== 'string') add(`${p}.role`, 'role must be display text.');
@@ -312,6 +321,31 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
     if (gate.rework?.targetNodes) for (const id of gate.rework.targetNodes) if (!gate.from.includes(id)) add(`gates.${gate.id}.rework.targetNodes`, `Rework target ${id} must be one of the Gate's from Nodes.`, 'invalid-flow', true);
     for (const id of gate.to) parents.get(id)?.push(...gate.from);
   }
+  if (plan.logicGates !== undefined && !Array.isArray(plan.logicGates)) add('logicGates', 'Expected an array of Logic Gates.');
+  for (const [index, gate] of (Array.isArray(plan.logicGates) ? plan.logicGates : []).entries()) {
+    const p = 'logicGates[' + index + ']';
+    if (!record(gate) || !identity(gate.id) || gateIds.has(gate.id)) { add(p, 'Expected a unique Gate ID.'); continue; }
+    gateIds.add(gate.id);
+    if (Object.keys(gate).some(k => !['id','from','routes'].includes(k)) || !identity(gate.from)) add(p, 'Logic Gate needs one source Node.');
+    if (!ids.has(gate.from)) add(p + '.from', 'Unknown Logic Gate source.', 'invalid-flow', true);
+    if (!Array.isArray(gate.routes) || !gate.routes.length) { add(p + '.routes', 'Logic Gate needs Routes.'); continue; }
+    const routeIds = new Set();
+    for (const [i, route] of gate.routes.entries()) {
+      const rp = p + '.routes[' + i + ']';
+      if (!record(route) || !identity(route.id) || routeIds.has(route.id)) { add(rp, 'Expected a unique Route ID.'); continue; }
+      routeIds.add(route.id);
+      if (Object.keys(route).some(k => !['id','to','condition'].includes(k))) add(rp, 'Unexpected Route field.');
+      if (!Array.isArray(route.to) || !route.to.length || !route.to.every(identity) || new Set(route.to).size !== route.to.length) add(rp + '.to', 'Expected unique target Nodes.');
+      else for (const id of route.to) {
+        if (!ids.has(id)) add(rp + '.to', 'Unknown Route target ' + id, 'invalid-flow', true);
+        parents.get(id)?.push(gate.from);
+      }
+      const c = route.condition;
+      if (!record(c) || Object.keys(c).some(k => !['path','operator','value'].includes(k)) || !Array.isArray(c.path) || !c.path.length || !c.path.every(k => typeof k === 'string') || !['eq','ne','gt','gte','lt','lte','exists'].includes(c.operator)) add(rp + '.condition', 'Expected a key path and supported condition operator.');
+      else if ((c.operator !== 'exists' || Object.hasOwn(c, 'value')) && !(c.value === null || ['boolean','string'].includes(typeof c.value) || Number.isFinite(c.value))) add(rp + '.condition.value', 'Expected a JSON primitive.');
+    }
+  }
+  for (const [i, item] of plan.deliverables.entries()) if (item?.whenNodeRuns && !ids.has(item.whenNodeRuns)) add('deliverables[' + i + '].whenNodeRuns', 'Unknown conditional deliverable Node.', 'invalid-flow', true);
   const visiting = new Set(), done = new Set();
   const visit = id => {
     if (!parents.has(id) || done.has(id)) return;
@@ -325,7 +359,8 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
 
 /** Display levels mirror runtime readiness (#runnable): a Node waits for its dependsOn AND every
  * Gate targeting it, so Gate-guarded successors render in a later column, never beside their source. */
-export function graphLevels(nodes = [], gates = []) {
+export function graphLevels(nodes = [], gates = [], logicGates = []) {
+  gates = [...gates, ...logicGates.map(g => ({ id: g.id, from: [g.from], to: g.routes.flatMap(r => r.to) }))];
   const remaining = new Map(nodes.map(n => [n.id, clone(n)])), done = new Set(), passed = new Set(), levels = [];
   while (remaining.size) {
     const ready = [...remaining.values()].filter(n => (n.dependsOn ?? []).every(id => done.has(id) || !remaining.has(id))
@@ -345,10 +380,10 @@ export function projectTemplate(template) {
 
 /** Derived Gate coverage (P-45): never a persisted state. A passed Gate is stale when a from-node
  * artifact has a newer version than the current cycle's passed review bound; humanOverride always covers. */
-function gateCoverage(g, artifacts) {
+function gateCoverage(g, artifacts, nodes) {
   if (g.status !== 'passed') return 'not-passed';
   if (g.humanOverride) return 'covered';
-  const from = Object.entries(artifacts ?? {}).filter(([, a]) => (g.from ?? []).includes(a.nodeId));
+  const from = Object.entries(artifacts ?? {}).filter(([, a]) => (g.from ?? []).includes(a.nodeId) && nodes.find(n => n.id === a.nodeId)?.status !== 'skipped');
   if (!from.length) return 'covered'; // legacy passed Gate without artifact bindings stays compatible
   const refs = (g.reviews ?? []).filter(r => r.decision === 'passed' && r.cycle === g.cycle).flatMap(r => r.artifactRefs ?? []);
   const uncovered = from.some(([id, a]) => { const lv = a.versions?.at(-1); return lv && !refs.some(r => r.artifactId === id && r.version === lv.version); });
@@ -379,10 +414,18 @@ export function projectTicket(ticket, { configRevision = ticket?.execution?.curr
   const validPlan = record(plan) ? plan : {};
   const definitions = validPlan.nodes ?? [];
   const nodes = Array.isArray(definitions) ? definitions.map(n => ({ ...clone(n), ...(t.execution?.nodes?.[n.id] ?? { status: 'pending', attempts: [], thread: [] }), id: n.id })) : [];
+  const bindIds = part => {
+    if (!Array.isArray(part.ticketDependencySeries)) return;
+    const resolved = part.ticketDependencySeries.map(id => t.dependencyBindings && Object.hasOwn(t.dependencyBindings,id) ? t.dependencyBindings[id] : null).filter(Boolean);
+    if (resolved.length) part.ticketDependencies = [...new Set([...(Array.isArray(part.ticketDependencies) ? part.ticketDependencies : []), ...resolved])];
+  };
+  const ticketScope = { ticketDependencies: validPlan.ticketDependencies, ticketDependencySeries: validPlan.ticketDependencySeries };
+  bindIds(ticketScope);
+  for (const node of nodes) bindIds(node);
   const artifacts = clone(t.execution?.artifacts ?? {});
   const gates = (Array.isArray(validPlan.gates) ? validPlan.gates : []).map(g => {
     const merged = { ...clone(g), ...(t.execution?.gates?.[g.id] ?? { status: 'pending', reviews: [], humanOverride: null, history: [] }), id: g.id };
-    merged.coverage = gateCoverage(merged, artifacts);
+    merged.coverage = gateCoverage(merged, artifacts, nodes);
     merged.rework = { enabled: Boolean(g.rework && g.rework.maxRounds > 0), maxRounds: g.rework?.maxRounds ?? 0, autoReworkRounds: merged.autoReworkRounds ?? 0, unlimited: g.reviewer?.kind === 'human', ...(g.rework?.scopeNote !== undefined ? { scopeNote: g.rework.scopeNote } : {}) };
     return merged;
   });
@@ -391,10 +434,11 @@ export function projectTicket(ticket, { configRevision = ticket?.execution?.curr
   const deliverables = (validPlan.deliverables ?? current.deliverables ?? []).map((item, index) => {
     // P-48: display title comes from the requested plan item (title || text); bound.label is history only.
     const view = deliverableView(item);
-    const bound = registry[String(index)], artifactId = bound?.artifactId, artifact = artifactId ? artifacts[artifactId] : undefined, lv = artifact?.versions?.at(-1);
+    const skipped = item?.whenNodeRuns && t.execution?.nodes?.[item.whenNodeRuns]?.status === 'skipped';
+    const bound = skipped ? null : registry[String(index)], artifactId = bound?.artifactId, artifact = artifactId ? artifacts[artifactId] : undefined, lv = artifact?.versions?.at(-1);
     const latest = lv ? { version: lv.version, sha256: lv.sha256, snapshotPath: lv.snapshotPath, submittedAt: lv.submittedAt } : undefined;
     // P-56: match each expected file to submitted artifacts bound to this deliverable index (exact path, else basename).
-    const indexArts = Object.entries(artifacts).filter(([, a]) => a && a.deliverableIndex === index && typeof a.sourcePath === 'string');
+    const indexArts = skipped ? [] : Object.entries(artifacts).filter(([, a]) => a && a.deliverableIndex === index && typeof a.sourcePath === 'string');
     const files = view.files.map(f => {
       if (f.path === undefined) return { ...f };
       const want = String(f.path).replace(/\\/g, '/');
@@ -404,15 +448,32 @@ export function projectTicket(ticket, { configRevision = ticket?.execution?.curr
       const [hitId, art] = hit, av = art.versions?.at(-1);
       return { ...f, submitted: av ? { artifactId: hitId, version: av.version, sha256: av.sha256, snapshotPath: av.snapshotPath, submittedAt: av.submittedAt } : undefined };
     });
-    const row = deliveryHistory.find(h => (h.items ?? []).some(it => it.deliverableIndex === index));
+    const row = deliveryHistory.slice(t.execution?.delivery?.cycleStart ?? 0).findLast(h => (h.items ?? []).some(it => it.deliverableIndex === index));
     const delivery = row ? { deliveryId: row.id, location: row.target, deliveredAt: row.time, manifestPath: row.manifestPath, receiptPath: row.receiptPath } : undefined;
-    return { index, label: view.label, spec: view.spec, ...(view.title !== undefined ? { title: view.title } : {}), ...(view.description !== undefined ? { description: view.description } : {}), criteria: clone(view.criteria), files, ...(view.category !== undefined ? { category: view.category } : {}), ...(artifactId ? { artifactId } : {}), ...(latest ? { latest } : {}), reviewStatus: artifactId ? deliverableReviewStatus(artifact, gates) : 'unbound', ...(delivery ? { delivery } : {}) };
+    return { index, label: view.label, spec: view.spec, ...(view.title !== undefined ? { title: view.title } : {}), ...(view.description !== undefined ? { description: view.description } : {}), ...(item?.whenNodeRuns ? { whenNodeRuns: item.whenNodeRuns } : {}), criteria: clone(view.criteria), files, ...(view.category !== undefined ? { category: view.category } : {}), ...(artifactId ? { artifactId } : {}), ...(latest ? { latest } : {}), reviewStatus: skipped ? 'skipped' : artifactId ? deliverableReviewStatus(artifact, gates) : 'unbound', ...(delivery ? { delivery } : {}) };
+  });
+  const logicDefinitions = Array.isArray(validPlan.logicGates) ? validPlan.logicGates.filter(g => record(g) && Array.isArray(g.routes) && g.routes.every(r => record(r) && Array.isArray(r.to) && record(r.condition) && Array.isArray(r.condition.path))) : [];
+  const logicGates = logicDefinitions.map(g => {
+    const decisions = t.execution?.logicDecisions;
+    const decision = decisions && Object.hasOwn(decisions, g.id) ? decisions[g.id] : null;
+    return { ...g, ...(decision ? { attemptId: decision.attemptId } : {}), routes: g.routes.map(route => {
+      const matched = decision?.routes.find(r => r.id === route.id)?.matched;
+      const states = route.to.map(id => nodes.find(n => n.id === id)?.status);
+      let status = 'pending';
+      if (matched === false || nodes.find(n => n.id === g.from)?.status === 'skipped') status = 'skipped';
+      else if (matched) {
+        if (states.some(s => ['failed','interrupted'].includes(s))) status = 'failed';
+        else if (states.every(s => s === 'completed' || s === 'skipped')) status = 'completed';
+        else status = states.includes('running') ? 'running' : 'matched';
+      }
+      return { ...route, status, ...(matched !== undefined ? { matched } : {}) };
+    }) };
   });
   const delivery = clone(t.execution?.delivery ?? null);
   const agents = Object.fromEntries(Object.entries(validPlan.agents ?? {}).map(([id, a]) => [id, { ...clone(a), id }]));
   const snapshot = configuration ? { ...clone(validPlan), configRevision, ...(unknownConfigRevision ? { unknownConfigRevision: true } : {}), ...(configuration.legacySnapshot ? { legacySnapshot: clone(configuration.legacySnapshot) } : {}), sourceRefs: clone(configuration.sourceRefs ?? []), agents, orchestration: { id: null, revision: configRevision, definition: { nodes: clone(validPlan.nodes ?? []), gates: clone(validPlan.gates ?? []) } }, binding: { orchestrationId: null, nodeAgents: Object.fromEntries(nodes.map(n => [n.id, n.agentId])), local: clone(validPlan.inputs ?? {}) } } : null;
   return { ...t, ...(unknownConfigRevision ? { unknownConfigRevision: true } : {}), goal: current.goal ?? '', ...(typeof current.title === 'string' && current.title.trim() ? { title: current.title } : {}), inputs: clone(current.inputs ?? {}), deliverables, artifacts, delivery, criteria: clone(current.criteria ?? []), ...(current.requirements === undefined ? {} : { requirements: current.requirements }),
-    nodes, gates, snapshot, events: clone(t.activity ?? []), changes: (t.activity ?? []).filter(a => ['plan-edited', 'plan-repaired', 'node-changed'].includes(a.type)).map(a => ({ id: a.id, time: a.time, actor: a.actor, revision: a.ticketRevision, ...clone(a.detail) })) };
+    ...(ticketScope.ticketDependencies ? { ticketDependencies: ticketScope.ticketDependencies } : {}), nodes, gates, ...(Array.isArray(validPlan.logicGates) ? { logicGates } : {}), snapshot, events: clone(t.activity ?? []), changes: (t.activity ?? []).filter(a => ['plan-edited', 'plan-repaired', 'node-changed'].includes(a.type)).map(a => ({ id: a.id, time: a.time, actor: a.actor, revision: a.ticketRevision, ...clone(a.detail) })) };
 }
 
 /** Lossless known legacy mapping. Unknown fields and complex criteria remain archived, never guessed. */

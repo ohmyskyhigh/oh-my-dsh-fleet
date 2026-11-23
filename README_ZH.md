@@ -14,13 +14,13 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 
 | 插件 | DeepSeek Harness | 确认版本 |
 | --- | --- | --- |
-| `oh-my-dsh-fleet@0.11.0` | **`0.2.2-rc.5`** | CLI 执行 `dsh --version`。桌面端使用应用自带的 Harness。 |
+| `oh-my-dsh-fleet@0.12.0` | **`0.2.2-rc.5`** | CLI 执行 `dsh --version`。桌面端使用应用自带的 Harness。 |
 
 | 安装渠道 | 桌面端「插件 → 添加插件」 | CLI（将 `web` 换成你的 Profile） |
 | --- | --- | --- |
-| **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.11.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.11.0/oh-my-dsh-fleet-0.11.0.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scripts` |
+| **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.12.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.12.0/oh-my-dsh-fleet-0.12.0.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scripts` |
 | **GitHub 仓库** | 粘贴 `https://github.com/ohmyskyhigh/oh-my-dsh-fleet`，从默认分支安装。 | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.11.0)** | 输入 `oh-my-dsh-fleet@0.11.0`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.11.0` |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.12.0)** | 输入 `oh-my-dsh-fleet@0.12.0`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.12.0` |
 
 安装后启用插件，按提示重启桌面应用或 CLI Profile。在侧栏打开 **oh-my-dsh-fleet**，为目标 Workspace 开启 Fleet，然后在该 Workspace 的对话中发送 `/fleet help`。
 
@@ -30,7 +30,7 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 
 ```sh
 dsh plugin --profile web remove @dsh-fleet/shell
-dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scripts
+dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.12.0.tgz" --ignore-scripts
 ```
 
 使用原来的 Workspace 文件夹与 Fleet 数据位置。已有 Ticket、模板、计划和 `/fleet` 命令继续使用。 [旧版 0.9.8 下载](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8)
@@ -55,6 +55,12 @@ dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scri
 | --- | --- |
 | 审核 Agent 根据指定输入和检查项做判断，可单独选模型、Skills 和 Tools。 | 负责人打开待审材料，批准或附意见退回。 |
 | ![Agent 审核的输入、检查项和能力配置](.github/assets/fleet-agent-gate.png) | ![人工审核的文件版本、通过和退回入口](.github/assets/fleet-ticket-flow.png) |
+
+### 跨 Ticket 依赖与逻辑关卡
+
+在「修改草稿 → 上游依赖与条件路线」中，可为整张 Ticket 或单个步骤选择同一 Workspace 的上游 Ticket。保存后，选择「上游交付后自动启动」即可授权整票在上游交付后启动。只为某一步配置依赖时，其他已就绪的步骤可以先执行。定时任务可按期匹配上游系列，也可选择「跟随上游系列」，由上游每期触发。
+
+点击「添加逻辑关卡」，按前序步骤提交的结构化交接数据选择执行路线。所有命中的路线都会执行。交付项也可以设为仅在负责该交付的步骤执行时才必交。详见 [Fleet 用户参考（英文）](docs/usage.md#coordinate-tickets-and-route-work)。
 
 ### 模板与定时运营
 

@@ -60,10 +60,13 @@ function actionInput(body) {
     'template-instantiate':['templateId','templateRevision','overrides','assignments','sessionId'],
     'series-create':['name','timing','sourceTicketId','templateId','templateRevision','overrides','assignments'],
     'series-update':['seriesId','fields','expectedRevision'],
+    'series-follow':['sourceTicketId','triggerSeriesId','expectedRevision','name'],
     'series-pause':['seriesId'], 'series-resume':['seriesId'], 'series-delete':['seriesId'],
     'draft-repair': ['sessionId', 'ticketId', 'expectedRevision', 'plan'],
     'draft-regenerate': ['sessionId', 'ticketId', 'expectedRevision', 'plan'],
     start: ['ticketId'], stop: ['ticketId'], resume: ['ticketId'],
+    'dependency-enable': ['ticketId', 'expectedRevision'],
+    'dependency-disable': ['ticketId', 'expectedRevision'],
     retry: ['ticketId', 'nodeId', 'reason'], say: ['ticketId', 'nodeId', 'message'],
     change: ['ticketId', 'nodeId', 'task', 'message', 'expectedRevision'], pass: ['ticketId', 'gateId'],
     review: ['ticketId', 'gateId', 'decision', 'evidence', 'artifactRefs'],
@@ -93,6 +96,13 @@ function actionInput(body) {
     case 'series-create':
       text(body.name,'name'); record(body.timing,'timing');
       if (Boolean(body.templateId) === Boolean(body.sourceTicketId)) invalid('Choose one series source.');
+      break;
+    case 'series-follow':
+      text(body.name, 'name');
+      if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) invalid('Expected a positive source Ticket revision.');
+      break;
+    case 'dependency-enable': case 'dependency-disable':
+      if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) invalid('Expected a positive Ticket revision.');
       break;
     case 'series-update':
       record(body.fields,'fields'); if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) invalid('Expected a positive series revision.');
@@ -207,7 +217,7 @@ export function registerFleetDashboardApi(ctx, { getService }) {
     const { service, target } = await context(workspaceId, true);
     const catalog = await service.catalog();
     const scoped = catalog.workspaces.find(entry => entry.id === workspaceId);
-    const tickets = scoped ? (await service.read(workspaceId)).map(ticket => projectTicket(ticket)) : [];
+    const tickets = !scoped ? [] : service.dashboardTickets ? await service.dashboardTickets(workspaceId) : (await service.read(workspaceId)).map(ticket => projectTicket(ticket));
     if (tickets.some(ticket => ticket.workspaceId !== workspaceId)) fail(500, 'workspace-state-mismatch', 'Fleet returned a Ticket from another Workspace.');
     const items = scoped && service.readSeries ? await service.readSeries(workspaceId) : [];
     const series = {...(service.scheduleStatus?.() ?? {available:false,unavailableReason:'Host schedule service is unavailable; scheduling cannot be enabled.'}),items};
@@ -295,6 +305,7 @@ export function registerFleetDashboardApi(ctx, { getService }) {
       if (body.sessionId && !ctx.workspaceRegistry.get(target.id)?.sessionIds?.includes(body.sessionId)) fail(409,'session-scope','Origin Session does not belong to this Workspace.');
       result = await service.human(target.id,actor.userId,'instantiateTemplate',[input]);
     } else if (body.action === 'series-create') result = await service.seriesCreate(target.id,{...input,actor});
+    else if (body.action === 'series-follow') result = await service.followSeries(target.id, input, actor.userId);
     else if (body.action === 'series-update') result = await service.seriesUpdate(target.id,body.seriesId,{fields:body.fields,expectedRevision:body.expectedRevision});
     else if (body.action === 'series-pause') result = await service.seriesPause(target.id,body.seriesId);
     else if (body.action === 'series-resume') result = await service.seriesResume(target.id,body.seriesId);
@@ -313,6 +324,8 @@ export function registerFleetDashboardApi(ctx, { getService }) {
       const reviewEvidence = body.artifactRefs === undefined ? body.evidence : { ...(body.evidence !== null && typeof body.evidence === 'object' && !Array.isArray(body.evidence) ? body.evidence : { text: body.evidence }), artifactRefs: body.artifactRefs };
       const actions = {
         start: ['start', [body.ticketId]], stop: ['stop', [body.ticketId]], resume: ['resume', [body.ticketId]],
+        'dependency-enable': ['enableDependencies', [body.ticketId, body.expectedRevision]],
+        'dependency-disable': ['disableDependencies', [body.ticketId, body.expectedRevision]],
         retry: ['retryNode', [body.ticketId, body.nodeId, body.reason]],
         say: ['commentNode', [body.ticketId, body.nodeId, body.message]],
         change: ['changeNode', [body.ticketId, body.nodeId, body.task, body.message ?? `User Dashboard change: ${JSON.stringify(body.task)}`, body.expectedRevision]],

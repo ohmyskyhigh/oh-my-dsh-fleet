@@ -22,6 +22,13 @@ export const fleetStyles = `
 .dsh-fleet-shell h3 {font-size:14px;line-height:1.5;font-weight:600}
 .dsh-fleet-shell .fl-muted {color:var(--fl-muted)}
 .dsh-fleet-shell .fl-small {font-size:12px}
+.dsh-fleet-shell .fl-routing {margin:8px 0;padding:0;border:0;min-width:0}
+.dsh-fleet-shell .fl-routing fieldset {margin:0;padding:10px 12px;border:1px solid var(--fl-border);border-radius:8px;min-width:0}
+.dsh-fleet-shell .fl-routing legend {padding-inline:5px;font-weight:600;overflow-wrap:anywhere}
+.dsh-fleet-shell .fl-routing .fl-chip,.dsh-fleet-shell [data-fleet-upstream-attempt] code {max-width:100%;overflow-wrap:anywhere}
+.dsh-fleet-shell .fl-dep-pickers {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:12px;min-width:0}
+.dsh-fleet-shell [data-fleet-upstream] {margin-block:12px}
+.dsh-fleet-shell [data-fleet-route] summary .fl-badge {margin-inline-start:8px}
 .dsh-fleet-shell .fl-mono {font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;overflow-wrap:anywhere}
 .dsh-fleet-shell .fl-row {display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}
 .dsh-fleet-shell .fl-between {justify-content:space-between}

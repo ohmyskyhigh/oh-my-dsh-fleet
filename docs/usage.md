@@ -8,6 +8,13 @@ Fleet uses DeepSeek Harness (DSH) workspaces and native sessions. Enable the plu
 2. Start the Ticket from Fleet, or send `/fleet start TICKET`. Starting freezes the plan for the run. Independent nodes can run concurrently within the scheduler's available slots. Review the status from the workspace Dashboard or use `/fleet list` and `/fleet show TICKET`.
 3. Open the node's native conversation from its details, or use `/fleet thread TICKET NODE`. Each attempt has its own session and can work with files from the shared workspace. The node view shows its stage plan, expected outcomes, model, and planned tools, skills, and plugins.
 
+## Coordinate Tickets and route work
+
+1. In **Edit draft → Upstream dependencies and conditional routes**, select **Upstream Tickets** under **Entire Ticket** or an individual step. Choose Tickets from the same Workspace, then save. An entire Ticket waits for all selected upstream Tickets to deliver. A step waits for its own upstream Tickets while independent steps can run.
+2. To start the whole Ticket automatically, choose **Enable start after upstream delivery** on the saved Ticket. You can withdraw authorization with **Disable automatic start** while it is waiting. For a recurring workflow, choose **Match upstream series per occurrence**. To have the upstream series trigger the downstream series, use **Follow upstream series** on the downstream draft.
+3. Under **Logic gates**, choose **Add logic gate**, select the handoff source step, and add routes with the steps to run on a match. In the source task, ask the agent to submit the fields as structured `fleet_submit` handoff data. For example, enter `signals` and `change` on separate lines as the handoff path, select `<`, and enter `0` as the comparison value. Every matching route runs. The Ticket details show the recorded route outcomes.
+4. Under **Deliverable requirements**, select a producing step for any deliverable that is only required when that step runs. Leave **Always required** selected for deliverables required on every run.
+
 ## Review and collect the files
 
 - A human gate waits for a decision from the Ticket. Open the materials, inspect their version, then approve or return them with reasons. An agent gate checks the configured inputs and checklist in its own session. Downstream nodes wait for their gates and dependencies.

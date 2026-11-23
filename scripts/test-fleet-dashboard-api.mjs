@@ -148,6 +148,25 @@ test('dashboard instantiates an originless draft, saves it, manages a series and
   assert.equal(ok(await f.action('series-update',{seriesId:series.id,expectedRevision:scoped.series.revision,fields:{goal:'changed'}})).result.plan.goal,'changed');
   for(const [action,status] of [['series-pause','paused'],['series-resume','active'],['series-delete','ended']]) assert.equal(ok(await f.action(action,{seriesId:series.id})).result.status,status);
 });
+test('Dashboard arms a saved dependency revision, shows the waiting ID, and withdraws authorization', async t => {
+  const f = await fixture(t);
+  const source = await f.seed('alpha', 'collect-index');
+  const consumer = await f.service.saveDraftTicket('alpha', {
+    id: 'analyze-index', plan: {...plan(), ticketDependencies: [source.id]}
+  });
+  f.wrapped.dashboardTickets = ws => f.service.dashboardTickets(ws);
+  const command = {ticketId: consumer.id, expectedRevision: consumer.revision};
+  error(await f.action('dependency-enable', {ticketId: consumer.id}), 400, 'invalid-request');
+  const enable = await f.action('dependency-enable', command);
+  ok(enable);
+  const selected = ok(await f.request(`/api/fleet/view?workspaceId=alpha&ticketId=${consumer.id}`)).selectedTicket;
+  assert.equal(selected.status, 'draft');
+  assert.deepEqual(selected.dependencyReadiness.waitingTicketIds, [source.id]);
+  assert.ok(selected.dependencyAuthorization);
+  ok(await f.action('dependency-disable', {...command, expectedRevision:selected.revision}));
+  assert.ok(!(await f.service.read('alpha', consumer.id)).dependencyAuthorization);
+  assert.equal(f.host.calls.length, 0);
+});
 async function files(directory) {
   const result = {};
   async function visit(location, relative = '') {

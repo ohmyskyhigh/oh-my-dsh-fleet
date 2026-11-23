@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { FleetCore, FleetCoreError, migrateState, defaultSettings, nativeProgressRow, assertStart } from './fleet-core.js';
-import { projectTicket, projectTemplate, effectiveModelSelection, effectiveGateModelSelection, readableTitle, seriesRecurrence } from './fleet-model.js';
+import { projectTicket, projectTemplate, effectiveModelSelection, effectiveGateModelSelection, readableTitle, seriesRecurrence, validatePlan } from './fleet-model.js';
 import { FleetStore, jsonClone, ticketFilename } from './fleet-store.js';
 
 const clone = value => structuredClone(value);
@@ -26,6 +26,22 @@ function agentScheduleTiming({kind, time, timeZone, date, weekdays}) {
     selector.weekdays = [...new Set(weekdays)].sort((a, b) => a - b);
   } else guard(weekdays === undefined, 'invalid-input', 'Only a weekly schedule accepts weekdays.');
   return {kind, [kind]: selector};
+}
+// Match scheduled receipts, never completion times. Different daily clock times can
+// describe one business day; more frequent rules require the exact scheduled instant.
+function occurrenceBinding(series, downstream, occurrenceAt) {
+  const candidates = series.occurrences.filter(entry => entry.ticketId);
+  const exact = candidates.find(entry => Date.parse(entry.occurrenceAt) === Date.parse(occurrenceAt));
+  if (exact) return exact.ticketId;
+  const dayRules = ['at', 'daily', 'weekly'];
+  const dayKind = entry => entry.host?.timing?.kind ?? entry.timing.kind;
+  if (![series, downstream].every(entry => dayRules.includes(dayKind(entry)))) return null;
+  const rule = downstream.timing;
+  const timeZone = downstream.host?.timing?.timeZone ?? rule[rule.kind]?.time_zone ?? 'UTC';
+  const format = new Intl.DateTimeFormat('en-CA', {timeZone, year:'numeric', month:'2-digit', day:'2-digit'});
+  const day = format.format(new Date(occurrenceAt));
+  const matches = candidates.filter(entry => format.format(new Date(entry.occurrenceAt)) === day);
+  return matches.length === 1 ? matches[0].ticketId : null;
 }
 const terminal = new Set(['completed', 'failed', 'stopped']);
 const liveServices = new Set();
@@ -210,7 +226,7 @@ export class FleetService {
       const { result, state } = await this.#store.transact(scope, fn);
       this.#core = FleetCore.fromState(state); return result;
     } catch (error) {
-      if (!error.code || !['store-busy', 'invalid-input', 'unsupported-contract', 'legacy-plan', 'stale-revision', 'control-locked', 'unknown-ticket', 'unknown-series', 'scope-required', 'unknown-workspace', 'unknown-node', 'unknown-gate', 'unknown-agent', 'unknown-flow', 'state-conflict', 'not-running', 'not-runnable', 'stale-attempt', 'stale-dispatch', 'not-reviewable', 'invalid-flow', 'incomplete-plan', 'unsupported-profile', 'completed-work-conflict', 'repair-required', 'duplicate-id', 'draft-scope', 'session-conflict', 'evidence-required', 'session-scope'].includes(error.code)) this.#fault = `Fleet persistence failed; dispatch paused: ${errorText(error)}`;
+      if (!error.code || !['store-busy', 'invalid-input', 'unsupported-contract', 'legacy-plan', 'stale-revision', 'control-locked', 'unknown-ticket', 'unknown-series', 'scope-required', 'dependency-wait', 'unknown-workspace', 'unknown-node', 'unknown-gate', 'unknown-agent', 'unknown-flow', 'state-conflict', 'not-running', 'not-runnable', 'stale-attempt', 'stale-dispatch', 'not-reviewable', 'invalid-flow', 'incomplete-plan', 'unsupported-profile', 'completed-work-conflict', 'repair-required', 'duplicate-id', 'draft-scope', 'session-conflict', 'evidence-required', 'session-scope'].includes(error.code)) this.#fault = `Fleet persistence failed; dispatch paused: ${errorText(error)}`;
       throw error;
     }
   }
@@ -345,6 +361,28 @@ export class FleetService {
       } catch (error) { if (entry?.id) await this.#schedule('scheduleEdit',{id:entry.id,action:'delete'}).catch(() => {}); throw error; }
     });
   }
+  followSeries(ws, {sourceTicketId, triggerSeriesId, name, expectedRevision}, userId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      const source = this.#core.readTicket(ws, sourceTicketId);
+      const prior = source.activity.find(e => e.type === 'series-created' && e.detail.sourceRevision === expectedRevision && e.actor?.userId === userId);
+      if (prior) {
+        const saved = this.#core.readSeries(ws, prior.detail.seriesId);
+        if (saved.triggerSeriesId === triggerSeriesId && saved.name === name) return saved;
+      }
+      guard(typeof name === 'string' && name.trim(), 'invalid-input', 'Name the dependent series.');
+      guard(['draft','stopped'].includes(source.status) && !source.abandonedAt, 'state-conflict', 'Choose an editable source Ticket.');
+      assertStart(source.plan);
+      await this.#checkStartSelections(ws, source.plan);
+      return this.#commit(ws, c => {
+        const current = c.readTicket(ws, sourceTicketId);
+        guard(current.revision === expectedRevision && current.revision === source.revision, 'stale-revision', 'Source Ticket changed while enabling its dependency rule.');
+        const trigger = c.readSeries(ws, triggerSeriesId);
+        guard(['active','paused'].includes(trigger.status), 'state-conflict', 'Choose an active or paused upstream series.');
+        return c.createSeries(ws, {name, sourceTicketId, triggerSeriesId, plan:current.plan, timing:trigger.timing, scheduleId:trigger.scheduleId, targetSessionId:trigger.targetSessionId, requestActor:{kind:'human',userId}});
+      });
+    });
+  }
   #hostEcho(entry) {
     const host = {};
     for (const k of ['status','scheduledAt','title']) if (typeof entry[k] === 'string') host[k] = entry[k];
@@ -355,6 +393,11 @@ export class FleetService {
   #editSeries(ws,id,status) {
     return this.#enqueue(async () => {
       await this.#refresh(); const s = this.#core.readSeries(ws,id);
+      if (s.triggerSeriesId) return this.#commit(ws, core => {
+        const current = core.readSeries(ws,id);
+        guard(current.revision === s.revision && ['active','paused'].includes(current.status), 'state-conflict', 'Dependent series has changed or ended.');
+        return core.setSeriesStatus(ws,id,status);
+      });
       const deleting = status === 'ended';
       const entry = await this.#schedule('scheduleEdit',{id:s.scheduleId,...(deleting ? {action:'delete'} : {action:'update',patch:{active:status === 'active'}})});
       if (entry.code === 'schedule_not_found' && !deleting) { await this.#commit(ws,c => c.setSeriesStatus(ws,id,'orphaned')); throw new FleetCoreError('unknown-series','Host schedule no longer exists.'); }
@@ -392,6 +435,21 @@ export class FleetService {
   }
   listDraftTickets(workspaceId, sessionId) { return this.#enqueue(async () => { await this.#refresh(); return this.#core.listDraftTickets(workspaceId, sessionId); }, true); }
   read(workspaceId, ticketId) { return this.#enqueue(async () => { await this.#refresh(); return ticketId ? this.#core.readTicket(workspaceId, ticketId) : this.#core.listTickets(workspaceId); }, true); }
+  dashboardTickets(ws) { return this.#enqueue(async () => {
+    await this.#refresh();
+    const runtime = this.#core.runtime(ws);
+    return this.#core.listTickets(ws).map(raw => {
+      const ticket = projectTicket(raw);
+      const configured = scope => scope?.ticketDependencies?.length || scope?.ticketDependencySeries?.length;
+      const nodes = Array.isArray(ticket.plan?.nodes) ? ticket.plan.nodes.filter(configured) : [];
+      const whole = configured(ticket.plan);
+      if ((whole || nodes.length) && validatePlan(ticket.plan, {mode:'save'}).valid) {
+        if (whole) ticket.dependencyReadiness = runtime.dependencyReadiness(ticket.id);
+        if (nodes.length) ticket.nodeDependencyReadiness = Object.fromEntries(nodes.map(n => [n.id, runtime.dependencyReadiness(ticket.id, n.id)]));
+      }
+      return ticket;
+    });
+  }, true); }
   list(workspaceId) { return this.read(workspaceId); }
   readDraft(workspaceId, ticketId) { return this.read(workspaceId, ticketId); }
   saveDraft(workspaceId, input) { return this.saveDraftTicket(workspaceId, input); }
@@ -403,13 +461,13 @@ export class FleetService {
   modelCatalog() { return this.#enqueue(() => this.#adapter.modelCatalog(), true); }
   /** Caller identity must be obtained from the authenticated user path, not tool arguments. */
   human(workspaceId, userId, action, args = []) {
-    const allowed = new Set(['start', 'stop', 'resume', 'retryNode', 'commentNode', 'changeNode', 'setPendingNodeModel', 'forcePassGate', 'reviewGate', 'deliverOverride', 'abandonTicket', 'unabandonTicket', 'replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'instantiateTemplate', 'repairTicket', 'regenerateTicket']);
+    const allowed = new Set(['start', 'stop', 'resume', 'retryNode', 'enableDependencies', 'disableDependencies', 'commentNode', 'changeNode', 'setPendingNodeModel', 'forcePassGate', 'reviewGate', 'deliverOverride', 'abandonTicket', 'unabandonTicket', 'replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'instantiateTemplate', 'repairTicket', 'regenerateTicket']);
     try { args = jsonClone(args); } catch (e) { return Promise.reject(new FleetCoreError('invalid-input', e.message)); }
     return this.#enqueue(async () => {
       guard(allowed.has(action), 'unknown-action', 'Unknown human Fleet action.');
       // P-50: start/resume validate every effective model selection against the live host catalog
       // before freezing; the catalog is read-only and fetched outside the commit transaction.
-      if (['start', 'resume', 'retryNode'].includes(action)) await this.#checkStartSelections(workspaceId, args[0]);
+      if (['start', 'resume', 'retryNode', 'enableDependencies'].includes(action)) await this.#checkStartSelections(workspaceId, args[0]);
       if (action === 'setPendingNodeModel') {
         await this.#refresh();
         const plan = this.#core.readTicket(workspaceId, args[0]).plan;
@@ -473,12 +531,87 @@ export class FleetService {
       }
       for (const ws of this.#core.listWorkspaces()) for (const s of this.#core.listSeries(ws)) {
         if (!['active','paused'].includes(s.status)) continue;
-        try { await this.#pollSeries(ws,s); }
+        try {
+          if (s.triggerSeriesId) await this.#followOccurrences(ws,s);
+          else await this.#pollSeries(ws,s);
+        }
         catch (error) { this.#lastError = {at:new Date().toISOString(),seriesId:s.id,message:errorText(error)}; }
       }
+      for (const ws of this.#core.listWorkspaces()) await this.#advanceDependencies(ws);
       return this.health;
     }).catch(error => { this.#lastError = { at: new Date().toISOString(), message: errorText(error) }; throw error; }).finally(() => { this.#ticking = undefined; });
     return this.#ticking;
+  }
+  async #followOccurrences(ws, series) {
+    if (series.status !== 'active') return;
+    const trigger = this.#core.readSeries(ws, series.triggerSeriesId);
+    const seen = new Set(series.occurrences.map(o => Date.parse(o.occurrenceAt)));
+    for (const upstream of trigger.occurrences.slice(series.triggerAfterCount)) {
+      if (!upstream.ticketId || seen.has(Date.parse(upstream.occurrenceAt))) continue;
+      const occurrenceAt = upstream.occurrenceAt;
+      const commit = change => this.#commit(ws, c => {
+        const current = c.readSeries(ws,series.id);
+        guard(current.status === 'active' && current.revision === series.revision, 'stale-revision', 'Dependent series changed.');
+        return change(c);
+      });
+      try { assertStart(series.plan); await this.#checkStartSelections(ws,series.plan,true); }
+      catch (error) {
+        if (!(error instanceof FleetCoreError)) throw error;
+        await commit(c => c.recordOccurrenceFailure(ws,series.id,{occurrenceAt,error:error.message}));
+        return;
+      }
+      await commit(c => {
+        const occurrence = c.recordOccurrenceAndStart(ws,series.id,{occurrenceAt});
+        if (!occurrence.duplicate) c.runtime(ws).bindOccurrence(occurrence.ticketId,{[trigger.id]:upstream.ticketId});
+      });
+    }
+    if (['ended','orphaned'].includes(trigger.status)) {
+      await this.#commit(ws, c => {
+        const current = c.readSeries(ws,series.id);
+        if (current.revision === series.revision && current.status === 'active') c.setSeriesStatus(ws,series.id,trigger.status);
+      });
+    }
+  }
+  async #advanceDependencies(ws) {
+    const waiting = this.#core.listTickets(ws).filter(t => !t.abandonedAt && (t.status === 'draft' ? t.dependencyAuthorization : t.status === 'running' && t.plan.nodes?.some(n => n.ticketDependencySeries?.length)));
+    if (!waiting.length) return;
+    const series = this.#core.listSeries(ws);
+    const byId = new Map(series.map(s => [s.id, s]));
+    const waitingIds = new Set(waiting.map(t => t.id));
+    const occurrences = new Map();
+    for (const item of series) for (const receipt of item.occurrences) {
+      if (waitingIds.has(receipt.ticketId)) occurrences.set(receipt.ticketId, {series:item, at:receipt.occurrenceAt});
+    }
+    for (const ticket of waiting) {
+      const occurrence = occurrences.get(ticket.id);
+      try {
+        if (occurrence && (ticket.status === 'running' || ticket.dependencyAuthorization)) {
+          const refs = new Set([ticket.plan, ...ticket.plan.nodes].flatMap(scope => scope.ticketDependencySeries ?? []));
+          const bindings = [];
+          for (const ref of refs) {
+            if (Object.hasOwn(ticket.dependencyBindings ?? {}, ref)) continue;
+            const upstream = byId.get(ref);
+            const concrete = upstream && occurrenceBinding(upstream, occurrence.series, occurrence.at);
+            if (concrete) bindings.push([ref, concrete]);
+          }
+          if (bindings.length) {
+            if (ticket.status === 'draft') await this.#checkStartSelections(ws, ticket.plan, true);
+            await this.#commit(ws, c => {
+              guard(c.readTicket(ws,ticket.id).revision === ticket.revision, 'stale-revision', 'Occurrence changed while resolving its dependencies.');
+              return c.runtime(ws).bindOccurrence(ticket.id, Object.fromEntries(bindings));
+            });
+          }
+        }
+        if (ticket.status === 'draft' && ticket.dependencyAuthorization && this.#core.runtime(ws).dependencyStartReady(ticket.id)) {
+          const current = this.#core.readTicket(ws, ticket.id);
+          await this.#checkStartSelections(ws, current.plan, true);
+          await this.#commit(ws, c => c.runtime(ws).startWhenReady(ticket.id, current.revision));
+        }
+      } catch (error) {
+        if (this.#fault) throw error;
+        this.#lastError = {at:new Date().toISOString(), ticketId:ticket.id, message:errorText(error)};
+      }
+    }
   }
   async #pollSeries(ws, series) {
     const {id,scheduleId} = series;
@@ -566,7 +699,11 @@ export class FleetService {
       try { await this.#commit(ws, c => c.runtime(ws).applyRework(ticketId, due.gateId)); }
       catch (error) { if (!['state-conflict', 'not-running', 'legacy-plan'].includes(error.code)) throw error; }
     }
-    await this.#commit(ws, c => { c.runtime(ws).noteReworkExhausted(ticketId); });
+    await this.#commit(ws, c => {
+      const runtime = c.runtime(ws);
+      runtime.noteReworkExhausted(ticketId);
+      if (ticket.plan.logicGates?.length) runtime.advanceLogic(ticketId);
+    });
     // P-46 delivery: reconcile an existing intent by receipt, otherwise persist intent → export → record.
     const intent = this.#core.readTicket(ws, ticketId).execution.delivery?.pending;
     if (intent) await this.#finishDelivery(ws, ticketId, intent);
@@ -583,7 +720,7 @@ export class FleetService {
     const activeCount = () => this.#core.listWorkspaces().flatMap(id => this.#core.listTickets(id).map(t => projectTicket(t))).filter(t => !t.execution?.legacy?.readOnly).reduce((count, t) => count + t.nodes.filter(n => n.status === 'running').length + t.gates.filter(g => g.dispatch && !['finished', 'failed', 'stopped'].includes(g.dispatch.phase)).length, 0);
     for (const gate of ticket.gates) {
       if (activeCount() >= this.#parallel) break;
-      if (gate.status === 'pending' && gate.reviewer.kind === 'agent' && !gate.dispatch && gate.from.every(id => ticket.nodes.find(n => n.id === id)?.status === 'completed')) {
+      if (gate.status === 'pending' && gate.reviewer.kind === 'agent' && !gate.dispatch && this.#core.runtime(ws).gateReady(ticketId, gate.id)) {
         await this.#startGate(ws, ticketId, gate.id);
       }
     }
@@ -602,7 +739,12 @@ export class FleetService {
   }
   #prompt(ticket, node) {
     const parentIds = new Set([...node.dependsOn, ...ticket.gates.filter(g => g.to.includes(node.id)).flatMap(g => g.from)]);
-    const upstream = ticket.nodes.filter(n => parentIds.has(n.id)).map(n => ({ nodeId: n.id, result: n.attempts.at(-1)?.outputs, summary: n.attempts.at(-1)?.completion?.summary ?? null, handoff: n.attempts.at(-1)?.completion?.handoff ?? null, artifacts: n.attempts.at(-1)?.completion?.artifactRefs ?? [], handleFile: FleetStore.handleFileRelPath(ticket.id, n.id).replace(/\\/g, '/') }));
+    for (const gate of ticket.plan.logicGates ?? []) {
+      if (gate.routes.some(route => route.to.includes(node.id))) parentIds.add(gate.from);
+    }
+    const logicConditions = (ticket.plan.logicGates ?? []).filter(g => g.from === node.id).flatMap(g => g.routes.map(r => ({gateId:g.id, routeId:r.id, condition:r.condition})));
+    const upstreamTickets = node.attempts.at(-1)?.upstreamTickets ?? [];
+    const upstream = ticket.nodes.filter(n => parentIds.has(n.id) && n.status === 'completed').map(n => ({ nodeId: n.id, result: n.attempts.at(-1)?.outputs, summary: n.attempts.at(-1)?.completion?.summary ?? null, handoff: n.attempts.at(-1)?.completion?.handoff ?? null, artifacts: n.attempts.at(-1)?.completion?.artifactRefs ?? [], handleFile: FleetStore.handleFileRelPath(ticket.id, n.id).replace(/\\/g, '/') }));
     const rework = node.thread.filter(r => r.intent === 'retry').map(r => ({ time: r.time, actor: r.actor, reason: r.text }));
     return [
       'You are executing one Fleet node. Complete the assigned work and report concrete outputs, file paths and verification. Do not change Fleet configuration or approve your own gates.',
@@ -617,6 +759,8 @@ export class FleetService {
       `Execution rules: ${JSON.stringify(ticket.execution.configurations[ticket.execution.currentConfigRevision].rules ?? {})}`,
       `Expected deliverables: ${JSON.stringify(ticket.snapshot.deliverables ?? [])}`,
       `Requirements: ${ticket.snapshot.requirements ?? ''}`,
+      ...(upstreamTickets.length ? [`Upstream Ticket deliverables: ${JSON.stringify(upstreamTickets)}`, 'Read the supplied sealed snapshot paths for the bound upstream Ticket IDs. Each version and hash identifies the input for this attempt.'] : []),
+      ...(logicConditions.length ? [`Logic Gate inputs: ${JSON.stringify(logicConditions)}`, 'Submit the observed field values in fleet_submit.handoff at the indicated paths. Fleet evaluates each condition independently after this node completes.'] : []),
       `Upstream handoff: ${JSON.stringify(upstream)}`,
       'Each upstream entry carries a handleFile (Workspace-relative path). Read it first: it lists the latest sealed artifact versions, hashes, snapshot paths, summary and handoff from the previous Agent. Build on those deliverables rather than redoing them.',
       `Rework findings from returned Gates: ${JSON.stringify(rework)}`,
@@ -775,8 +919,10 @@ export class FleetService {
         `Review stage plan: ${JSON.stringify(node.task?.stagePlan ?? {})}`,
         ...(frozenGate.rework?.scopeNote ? [`Gate review scope: ${JSON.stringify(frozenGate.rework.scopeNote)}`] : [])
       ];
-      const versions = Object.entries(ticket.artifacts ?? {}).filter(([, a]) => gate.from.includes(a.nodeId)).map(([artifactId, a]) => { const lv = a.versions.at(-1); return { artifactId, nodeId: a.nodeId, sourcePath: a.sourcePath, version: lv.version, sha256: lv.sha256, snapshotPath: lv.snapshotPath }; });
-      const deliveries = ticket.nodes.filter(n => gate.from.includes(n.id)).map(n => {
+      const reviewSources = ticket.nodes.filter(n => gate.from.includes(n.id) && n.status === 'completed');
+      const reviewIds = new Set(reviewSources.map(n => n.id));
+      const versions = Object.entries(ticket.artifacts ?? {}).filter(([, a]) => reviewIds.has(a.nodeId)).map(([artifactId, a]) => { const lv = a.versions.at(-1); return { artifactId, nodeId: a.nodeId, sourcePath: a.sourcePath, version: lv.version, sha256: lv.sha256, snapshotPath: lv.snapshotPath }; });
+      const deliveries = reviewSources.map(n => {
         const attempt = n.attempts.at(-1);
         return { node: n.id, output: attempt?.outputs, summary: attempt?.completion?.summary, handoff: attempt?.completion?.handoff };
       });

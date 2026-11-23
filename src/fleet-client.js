@@ -110,7 +110,7 @@ export function createFleetPlugin(require) {
           target.patch(next);
           await requestView(id,true);
           return body;
-        }catch(error){if(!disposed){target.patch({error:fleetErrorRecord(error),...(target.get().dialog?{dialogError:fleetErrorRecord(error)}:{})});if(['fleet/scope-required','fleet/stale-revision'].includes(error.code))await requestView(id,true);}return null;}
+        }catch(error){if(!disposed){target.patch({error:fleetErrorRecord(error),...(target.get().dialog?{dialogError:fleetErrorRecord(error)}:{})});if(['fleet/scope-required','fleet/stale-revision','fleet/dependency-wait'].includes(error.code))await requestView(id,true);}return null;}
         finally{view.busy=false;notifyViews();}
       }
       ctx.effect(()=>{
@@ -280,7 +280,7 @@ export function createFleetPlugin(require) {
           const setUIFn=patch=>{const {page,...rest}=patch;pane.ui={...pane.ui,...rest};notifyViews();};
           const sink={get:()=>pane.ui,patch:setUIFn};
           const navigateFn=(page,patch={})=>{
-            if(page==='ticket'&&patch.ticketId){pane.ui={...pane.ui,ticketId:patch.ticketId,nodeId:patch.nodeId??null,error:null,notice:null,dialog:null};notifyViews();return;}
+            if(page==='ticket'&&patch.ticketId&&view.data.tickets.some(ticket=>ticket.id===patch.ticketId&&ticket.originSessionId===sessionId)){pane.ui={...pane.ui,ticketId:patch.ticketId,nodeId:patch.nodeId??null,error:null,notice:null,dialog:null};notifyViews();return;}
             selectWorkspace(scope.workspaceId);
             setUI(scope.workspaceId,{page,scheduleId:patch.scheduleId??null,ticketId:patch.ticketId??null,nodeId:patch.nodeId??null,agentId:patch.agentId??null,flowId:patch.flowId??null,error:null,notice:null,dialog:null});
           };

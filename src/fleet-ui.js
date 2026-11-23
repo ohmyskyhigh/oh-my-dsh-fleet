@@ -16,14 +16,60 @@ export function deliveryGapInfo(ticket) {
   const deliverables = Array.isArray(ticket?.deliverables) ? ticket.deliverables : [];
   const gates = Array.isArray(ticket?.gates) ? ticket.gates : [];
   const nodes = Array.isArray(ticket?.nodes) ? ticket.nodes : [];
-  const unbound = deliverables.filter(d => !d.artifactId).map(d => ({ index: d.index, label: d.label }));
+  const unbound = deliverables.filter(d => !d.artifactId && d.reviewStatus !== 'skipped').map(d => ({ index: d.index, label: d.label }));
   const staleGates = gates.filter(g => g.coverage === 'stale').map(g => g.id);
   const pendingExport = Boolean(ticket?.delivery?.pending);
-  const allCompleted = nodes.length > 0 && nodes.every(n => n.status === 'completed');
-  const allPassed = gates.every(g => g.status === 'passed');
+  const allCompleted = nodes.length > 0 && nodes.every(n => ['completed','skipped'].includes(n.status));
+  const allPassed = gates.every(g => ['passed','skipped'].includes(g.status));
   const blocked = !ticket?.delivery?.override && (unbound.length > 0 || staleGates.length > 0 || pendingExport);
   const canOverride = ticket?.status === 'running' && allCompleted && allPassed && blocked;
   return { unbound, staleGates, pendingExport, allCompleted, allPassed, blocked, canOverride };
+}
+const referenceKeys = ['ticketDependencies', 'ticketDependencySeries'];
+const readReferences = owner => Object.fromEntries(referenceKeys.map(key => [key, [...(owner?.[key] ?? [])]]));
+const planHasSeries = plan => [plan, ...(plan?.nodes ?? [])].some(owner => owner?.ticketDependencySeries?.length);
+function routingFields(plan) {
+  return {
+    ...readReferences(plan),
+    nodes: (plan.nodes ?? []).map(node => ({id:node.id, ...readReferences(node)})),
+    gates: (plan.logicGates ?? []).map(gate => ({...gate, routes:gate.routes.map(route => ({...route,
+      path:route.condition.path.join('\n'), operator:route.condition.operator, operand:JSON.stringify(route.condition.value) ?? ''}))})),
+    bindings: (plan.deliverables ?? []).map(item => item?.whenNodeRuns ?? '')
+  };
+}
+function writeReferenceFields(owner, fields) {
+  for (const key of referenceKeys) {
+    if (fields[key].length) owner[key] = [...fields[key]];
+    else delete owner[key];
+  }
+}
+function applyRouting(plan, fields, L) {
+  const next = structuredClone(plan);
+  writeReferenceFields(next, fields);
+  for (const node of next.nodes ?? []) {
+    const references = fields.nodes.find(item => item.id === node.id);
+    if (references) writeReferenceFields(node, references);
+  }
+  if (fields.gates.length) next.logicGates = fields.gates.map(gate => ({id:gate.id,from:gate.from,routes:gate.routes.map(route => {
+    const prior = route.condition;
+    const path = prior?.path.join('\n') === route.path ? prior.path : route.path.split('\n');
+    const condition = {path,operator:route.operator};
+    if (route.operator === 'exists' && prior?.operator === 'exists' && Object.hasOwn(prior,'value')) condition.value = prior.value;
+    if (route.operator !== 'exists') {
+      try {
+        condition.value = JSON.parse(route.operand);
+        if (condition.value !== null && typeof condition.value === 'object' || typeof condition.value === 'number' && !Number.isFinite(condition.value)) throw new Error();
+      } catch { throw new Error(L(`路线 ${route.id} 的比较值须为 JSON 字符串、数字、布尔值或 null。`,`Enter a JSON string, number, boolean or null for route ${route.id}.`)); }
+    }
+    return {id:route.id,to:route.to,condition};
+  })}));
+  else delete next.logicGates;
+  for (const [index, binding] of fields.bindings.entries()) {
+    const item = next.deliverables[index];
+    if (binding) next.deliverables[index] = {...(typeof item === 'string' ? {text:item} : item), whenNodeRuns:binding};
+    else if (item && typeof item === 'object') delete item.whenNodeRuns;
+  }
+  return next;
 }
 /** Pure draft structural edits (P-44/P-46/P-47); produce save-valid plans, never write back. */
 export function applyGatePolicy(plan, gateId, { requireEvidence, rework }) {
@@ -117,7 +163,7 @@ export function createFleetViews(React) {
   const list = value => Array.isArray(value) ? value : [];
   const text = value => typeof value === 'string' ? value : json(value);
   const tones = {running:'running',draft:'neutral',pending:'waiting','stop-requested':'waiting',stopped:'neutral',delivered:'success',completed:'success',passed:'success',returned:'danger',failed:'danger',interrupted:'danger',cancelled:'neutral'};
-  const names = {superseded:['已替代','Superseded'],draft:['草稿','Draft'],running:['执行中','Running'],'stop-requested':['正在停止','Stopping'],stopped:['已停止','Stopped'],delivered:['已交付','Delivered'],pending:['待执行','Pending'],completed:['已完成','Completed'],passed:['已通过','Passed'],returned:['已退回','Returned'],failed:['执行失败','Failed'],interrupted:['待核对','Interrupted'],cancelled:['已取消','Cancelled']};
+  const names = {skipped:['已跳过','Skipped'],matched:['已命中','Matched'],superseded:['已替代','Superseded'],draft:['草稿','Draft'],running:['执行中','Running'],'stop-requested':['正在停止','Stopping'],stopped:['已停止','Stopped'],delivered:['已交付','Delivered'],pending:['待执行','Pending'],completed:['已完成','Completed'],passed:['已通过','Passed'],returned:['已退回','Returned'],failed:['执行失败','Failed'],interrupted:['待核对','Interrupted'],cancelled:['已取消','Cancelled']};
   const button = (label, onClick, props = {}) => h('button',{type:'button',className:'fl-btn',onClick,...props},label);
   const badge = (label, tone='neutral') => h('span',{className:'fl-badge','data-tone':tone},label);
   const status = (value,L) => badge(names[value] ? L(...names[value]) : value,tones[value]);
@@ -136,16 +182,19 @@ export function createFleetViews(React) {
   const icon = name => h('span',{'aria-hidden':true},({plus:'＋',back:'←',arrow:'↗',refresh:'↻',flow:'◇',agent:'◈',chat:'↗'})[name] || name);
   const language = options => (cn,en) => options.language === 'zh' ? cn : en;
   const hasIssues = ticket => !ticket.abandonedAt && (list(ticket.nodes).some(n=>['failed','interrupted'].includes(n.status)) || list(ticket.gates).some(g=>g.status==='returned'));
+  const reviewSources=(ticket,gate)=>list(gate?.from).map(id=>list(ticket.nodes).find(n=>n.id===id));
+  const sourcesReady=(ticket,gate)=>{const sources=reviewSources(ticket,gate);return sources.some(n=>n?.status==='completed')&&sources.every(n=>['completed','skipped'].includes(n?.status));};
+  const reviewSourceArtifacts=(ticket,gate)=>{const ids=reviewSources(ticket,gate).filter(n=>n?.status==='completed').map(n=>n.id);return Object.entries(ticket.artifacts||{}).filter(([,artifact])=>ids.includes(artifact.nodeId)&&list(artifact.versions).length);};
   const waiting = ticket => {
     if (ticket.status !== 'running' || ticket.abandonedAt) return [];
-    return list(ticket.gates).filter(g=>g.status==='pending' && list(g.from).every(id=>list(ticket.nodes).some(n=>n.id===id&&n.status==='completed')));
+    return list(ticket.gates).filter(g=>g.status==='pending' && sourcesReady(ticket,g));
   };
   const timestamp = (value,L) => value ? new Date(value).toLocaleString(L('zh-CN','en'), {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
   // P-44～P-47 derived display helpers. Projections only; nothing here writes back.
   const shortHash = value => typeof value === 'string' && value.length > 8 ? `${value.slice(0,8)}…` : (value || '—');
   const coverageNames = {covered:['已审核','Reviewed'],stale:['待复核','Re-review needed'],unreviewed:['未审核','Not reviewed'],'not-passed':['未通过','Not passed']};
   const coverageTones = {covered:'success',stale:'danger',unreviewed:'neutral','not-passed':'neutral'};
-  const deliverableStatusNames = {unbound:['未绑定','Unbound'],unreviewed:['未审核','Not reviewed'],covered:['已审核','Reviewed'],stale:['待复核','Re-review needed']};
+  const deliverableStatusNames = {skipped:['已跳过','Skipped'],unbound:['未绑定','Unbound'],unreviewed:['未审核','Not reviewed'],covered:['已审核','Reviewed'],stale:['待复核','Re-review needed']};
   const deliverableStatusTones = {unbound:'neutral',unreviewed:'neutral',covered:'success',stale:'danger'};
   const staleAlert = L => h('p',{className:'fl-notice fl-small',role:'alert'},L('产物已更新，审核结论未覆盖最新版本','The artifact has been updated; the review verdict does not cover the latest version.'));
   // Native /api/file anchor (same-origin auth as /api/fleet/*); never a fake link when the target is unknown.
@@ -322,6 +371,7 @@ export function createFleetViews(React) {
   };
   const weekdayNames=L=>[L('周一','Mon'),L('周二','Tue'),L('周三','Wed'),L('周四','Thu'),L('周五','Fri'),L('周六','Sat'),L('周日','Sun')];
   const timingSummary=(series,L)=>{
+    if(series.triggerSeriesId)return L(`跟随上游系列 ${series.triggerSeriesId}`,`Follows upstream series ${series.triggerSeriesId}`);
     const timing=effectiveSeriesTiming(series),kind=timing?.kind,zone=seriesZone(series),clock=value=>String(value||'').slice(0,5);
     if(kind==='daily')return `${L('每天','Daily')} ${clock(timing.daily.time)} · ${zone}`;
     if(kind==='weekly'){const days=list(timing.weekly.weekdays).map(d=>weekdayNames(L)[d-1]||d).join(L('、',', '));return `${L('每周','Weekly')} ${days} ${clock(timing.weekly.time)} · ${zone}`;}
@@ -338,7 +388,7 @@ export function createFleetViews(React) {
   };
   const seriesStatusNames={active:['启用中','Active'],paused:['已暂停','Paused'],orphaned:['宿主任务已删除','Host task deleted'],ended:['已结束','Ended']};
   const seriesStatusTones={active:'success',paused:'waiting',orphaned:'danger',ended:'neutral'};
-  const occurrenceStatusNames={started:['已建票','Started'],failed:['失败','Failed']};
+  const occurrenceStatusNames={waiting:['等待上游','Waiting for upstream'],started:['已建票','Started'],failed:['失败','Failed']};
   const scheduleUnavailableReason=(data,L)=>data?.series&&data.series.available===false?(data.series.unavailableReason||L('宿主定时服务（dsh-schedule）不可用，无法创建或管理计划。','The host schedule service (dsh-schedule) is unavailable; schedules cannot be created or managed.')):null;
   function ticketSeries(ticket,data) {
     const matches=list(data?.series?.items).flatMap(series=>{
@@ -544,8 +594,8 @@ export function createFleetViews(React) {
     for(const oc of occ){const t=Date.parse(oc.occurrenceAt);if(!Number.isFinite(t))continue;seen.add(t);
       const startedAt=oc.status==='started'&&oc.createdAt?new Date(oc.createdAt):null;
       const displayAt=startedAt?.getTime()??t;
-      if(displayAt>=from&&displayAt<to)out.push({series,at:new Date(t),startedAt,state:oc.status==='failed'?'failed':'done',ticketId:oc.ticketId||null,error:oc.error||null});}
-    if(['ended','orphaned'].includes(series.status))return out;
+      if(displayAt>=from&&displayAt<to)out.push({series,at:new Date(t),startedAt,state:oc.status==='failed'?'failed':oc.status==='waiting'?'waiting':'done',ticketId:oc.ticketId||null,error:oc.error||null});}
+    if(series.triggerSeriesId||['ended','orphaned'].includes(series.status))return out;
     const timing=effectiveSeriesTiming(series),kind=timing?.kind,paused=series.status==='paused';
     const push=at=>{const t=at.getTime();if(!Number.isFinite(t)||t<from||t>=to||t<Date.now()-60000)return;
       // A receipt may differ from the projected instant by sub-second precision.
@@ -566,8 +616,8 @@ export function createFleetViews(React) {
     }
     return out;
   }
-  const calEventTone={upcoming:null,done:'success',failed:'danger',paused:'waiting',ended:null};
-  const calEventName=(state,L)=>({upcoming:L('待执行','Upcoming'),done:L('已建票','Started'),failed:L('失败','Failed'),paused:L('已暂停','Paused'),ended:L('已结束','Ended')})[state]||state;
+  const calEventTone={waiting:'waiting',upcoming:null,done:'success',failed:'danger',paused:'waiting',ended:null};
+  const calEventName=(state,L)=>({waiting:L('等待上游','Waiting for upstream'),upcoming:L('待执行','Upcoming'),done:L('已建票','Started'),failed:L('失败','Failed'),paused:L('已暂停','Paused'),ended:L('已结束','Ended')})[state]||state;
   function ScheduleCalendar({L,items,act,busy,navigate,openDialog,unavailable,workspaceBlocked}){
     const [view,setView]=React.useState('week');
     const [anchor,setAnchor]=React.useState(()=>new Date());
@@ -684,11 +734,11 @@ export function createFleetViews(React) {
     const latestOccurrence=series=>list(series.occurrences).slice().sort((a,b)=>String(b.occurrenceAt).localeCompare(String(a.occurrenceAt)))[0]||null;
     return h('details',{className:'fl-cal-allseries',open,'data-fleet-allseries':'',onToggle:e=>setOpen(e.currentTarget.open)},
       h('summary',null,`${L('全部计划','All schedules')} (${items.length})`),
-      h('p',{className:'fl-help fl-spaced'},L('要修改钟点或时区，请在 DSH「自动化任务」中找到同名计划。','To change the time or time zone, find the schedule by name in DSH’s scheduled task manager.')),
+      items.some(s=>!s.triggerSeriesId)&&h('p',{className:'fl-help fl-spaced'},L('要修改定时计划的钟点或时区，请在 DSH「自动化任务」中找到同名计划。','To change a timed schedule’s time or time zone, find it by name in DSH’s scheduled task manager.')),
       items.length?h('div',{className:'fl-stack'},...items.map(series=>{
         const zone=seriesZone(series),expanded=ui.scheduleId===series.id,last=latestOccurrence(series);
         const source=seriesSource(series);
-        const nextRun=series.status==='ended'?L('已结束','Ended'):series.status==='orphaned'?L('停止建票','Ticket creation stopped'):zoneTimestamp(nextSeriesTime(series),zone,L);
+        const nextRun=series.triggerSeriesId&&series.status==='paused'?L('已暂停','Paused'):series.triggerSeriesId&&series.status==='active'?L('随上游建票','On upstream occurrence'):series.status==='ended'?L('已结束','Ended'):series.status==='orphaned'?L('停止建票','Ticket creation stopped'):zoneTimestamp(nextSeriesTime(series),zone,L);
         return h('article',{className:'fl-schedrow','data-fleet-series':series.id,key:series.id},
           h('div',{className:'fl-row fl-between fl-schedmain'},
             h('div',{className:'fl-stack'},
@@ -699,7 +749,7 @@ export function createFleetViews(React) {
                   :source.kind==='ticket'
                     ?button(`Ticket · ${source.ticketId}`,()=>navigate('ticket',{ticketId:source.ticketId,nodeId:null}),{className:'fl-btn fl-btn-ghost fl-btn-sm','data-fleet-series-source':series.id})
                     :h('span',null,L('来源未知','Unknown source')),
-                h('span',{'data-fleet-series-timing':series.id},timingSummary(series,L)))),
+                series.triggerSeriesId?button(timingSummary(series,L),()=>setUI({scheduleId:series.triggerSeriesId}),{className:'fl-title-button','data-fleet-series-trigger':series.id}):h('span',{'data-fleet-series-timing':series.id},timingSummary(series,L)))),
             h('div',{className:'fl-stack fl-schedmeta'},
               h('span',{className:'fl-small fl-muted'},L('下次执行','Next run')),
               h('span',{'data-fleet-series-next':series.id},nextRun),
@@ -717,7 +767,7 @@ export function createFleetViews(React) {
               h('tbody',null,...list(series.occurrences).slice().sort((a,b)=>String(b.occurrenceAt).localeCompare(String(a.occurrenceAt))).map(occ=>h('tr',{key:occ.occurrenceAt,'data-fleet-occurrence':occ.occurrenceAt},
                 h('td',null,zoneTimestamp(occ.occurrenceAt,zone,L)),
                 h('td',null,occ.createdAt?zoneTimestamp(occ.createdAt,zone,L):'—'),
-                h('td',null,badge(L(...(occurrenceStatusNames[occ.status]||[occ.status,occ.status])),occ.status==='started'?'success':'danger'),occ.error&&h('p',{className:'fl-small fl-muted','data-fleet-occurrence-error':occ.occurrenceAt},occ.error)),
+                h('td',null,badge(L(...(occurrenceStatusNames[occ.status]||[occ.status,occ.status])),occ.status==='started'?'success':occ.status==='waiting'?'waiting':'danger'),occ.error&&h('p',{className:'fl-small fl-muted','data-fleet-occurrence-error':occ.occurrenceAt},occ.error)),
                 h('td',null,occ.ticketId?button(occ.ticketId,()=>navigate('ticket',{ticketId:occ.ticketId,nodeId:null}),{className:'fl-btn fl-btn-ghost fl-mono','data-fleet-occurrence-ticket':occ.ticketId}):'—')))))
               :h('p',{className:'fl-help'},L('尚无期次记录。','No occurrences yet.'))));
       }))
@@ -734,12 +784,56 @@ export function createFleetViews(React) {
       h(ScheduleCalendar,{L,items,act,busy,navigate,openDialog,unavailable}),
       h(AllSeries,{L,items,ui,setUI,act,busy,navigate,openDialog,unavailable}));
   }
+  function referencePicker(label,selected,choices,update,L) {
+    const remaining=choices.filter(item=>!selected.includes(item.id));
+    return h('div',{className:'fl-stack'},h('label',{className:'fl-field'},label,
+      h('select',{value:'',onChange:event=>event.target.value&&update([...selected,event.target.value])},
+        h('option',{value:''},L('选择…','Select…')),...remaining.map(item=>h('option',{key:item.id,value:item.id},item.label)))),
+      selected.length>0&&h('div',{className:'fl-row'},...selected.map(id=>h('span',{key:id,className:'fl-chip'},choices.find(choice=>choice.id===id)?.label||id,
+        button('×',()=>update(selected.filter(item=>item!==id)),{className:'fl-btn fl-btn-ghost fl-btn-sm','aria-label':L(`移除 ${id}`,`Remove ${id}`)})))));
+  }
+  function dependencyFields({L,data,ticketId,seriesId,form,onChange}) {
+    const tickets=list(data?.tickets).filter(item=>item.id!==ticketId&&!isIncompatibleDraft(item)).map(item=>({id:item.id,label:`${ticketTitle(item)} · ${item.id}`}));
+    const series=list(data?.series?.items).filter(item=>item.id!==seriesId).map(item=>({id:item.id,label:`${item.name||item.id} · ${item.id}`}));
+    const pick=(owner,change)=>h('div',{className:'fl-dep-pickers'},
+      referencePicker(L('上游 Ticket','Upstream Tickets'),owner.ticketDependencies,tickets,ids=>change({ticketDependencies:ids}),L),
+      referencePicker(L('每期匹配上游系列','Match upstream series per occurrence'),owner.ticketDependencySeries,series,ids=>change({ticketDependencySeries:ids}),L));
+    return h('div',{className:'fl-stack'},h('strong',null,L('整张 Ticket','Entire Ticket')),pick(form,patch=>onChange({...form,...patch})),
+      ...form.nodes.map((node,i)=>h('details',{key:node.id},h('summary',null,`${L('步骤','Step')} · ${node.id} (${node.ticketDependencies.length+node.ticketDependencySeries.length})`),
+        pick(node,patch=>onChange({...form,nodes:form.nodes.map((n,j)=>i===j?{...n,...patch}:n)})))));
+  }
+  function routingEditor({L,data,plan,ticketId,form,onChange,locked}) {
+    const options=list(plan.nodes).map(n=>({id:n.id,label:n.id}));
+    const nodeSelect=(label,value,change,empty)=>h('label',{className:'fl-field'},label,h('select',{value,onChange:e=>change(e.target.value)},
+      h('option',{value:''},empty||L('选择步骤…','Select a step…')),...options.map(n=>h('option',{key:n.id,value:n.id},n.label))));
+    const field=(label,value,change,multiline=false)=>h('label',{className:'fl-field'},label,h(multiline?'textarea':'input',{value,onChange:e=>change(e.target.value)}));
+    const updateGate=(i,patch)=>onChange({...form,gates:form.gates.map((g,j)=>i===j?{...g,...patch}:g)});
+    const addRoute=()=>({id:'',to:[],path:'',operator:'exists',operand:''});
+    const operators={exists:L('存在','Exists'),eq:'=',ne:'≠',gt:'>',gte:'≥',lt:'<',lte:'≤'};
+    return h('fieldset',{className:'fl-stack fl-routing',disabled:locked},dependencyFields({L,data,ticketId,form,onChange}),
+      h('h3',null,L('逻辑关卡','Logic gates')),
+      ...form.gates.map((gate,i)=>h('fieldset',{key:i,className:'fl-stack'},h('legend',null,gate.id||L('新关卡','New gate')),
+        field(L('关卡 ID','Gate ID'),gate.id,id=>updateGate(i,{id})),nodeSelect(L('交接数据来源步骤','Handoff source step'),gate.from,from=>updateGate(i,{from})),
+        ...gate.routes.map((route,j)=>{
+          const update=patch=>updateGate(i,{routes:gate.routes.map((r,k)=>k===j?{...r,...patch}:r)});
+          return h('fieldset',{key:j,className:'fl-stack'},h('legend',null,route.id||L('新路线','New route')),
+            field(L('路线 ID','Route ID'),route.id,id=>update({id})),referencePicker(L('命中后执行步骤','Steps to run on match'),route.to,options,to=>update({to}),L),
+            field(L('交接数据路径（每行一级键名）','Handoff path (one key per line)'),route.path,path=>update({path}),true),
+            h('label',{className:'fl-field'},L('条件','Condition'),h('select',{value:route.operator,onChange:e=>update({operator:e.target.value})},...Object.entries(operators).map(([key,label])=>h('option',{key,value:key},label)))),
+            route.operator!=='exists'&&field(L('比较值（如 5、true 或 "下降"）','Comparison value (e.g. 5, true or "decline")'),route.operand,operand=>update({operand})),
+            button(L('移除路线','Remove route'),()=>updateGate(i,{routes:gate.routes.filter((_,k)=>j!==k)})));
+        }),row(button(L('添加路线','Add route'),()=>updateGate(i,{routes:[...gate.routes,addRoute()]})),button(L('移除关卡','Remove gate'),()=>onChange({...form,gates:form.gates.filter((_,j)=>j!==i)}))))),
+      row(button(L('添加逻辑关卡','Add logic gate'),()=>onChange({...form,gates:[...form.gates,{id:'',from:'',routes:[addRoute()]}]}))),
+      form.bindings.length>0&&h('h3',null,L('交付项的执行条件','Deliverable requirements')),
+      ...form.bindings.map((binding,i)=>{const item=plan.deliverables[i];return h('div',{key:i},nodeSelect(typeof item==='string'?item:item.title||item.text,binding,id=>onChange({...form,bindings:form.bindings.map((old,j)=>i===j?id:old)}),L('整票必交','Always required')));}));
+  }
   // 系列配置编辑（series-update）：只提交本次修改的顶层 plan 字段，整字段替换＋series CAS。
-  function SeriesConfigForm({L,series,busy,error,onSubmit,onCancel}) {
+  function SeriesConfigForm({L,data,series,busy,error,onSubmit,onCancel}) {
     const [original]=React.useState(series);
     const plan=original.plan||{};
     const lines=value=>String(value||'').split('\n').map(x=>x.trim()).filter(Boolean);
     const [goal,setGoal]=React.useState(plan.goal||'');
+    const [references,setReferences]=React.useState(()=>routingFields(plan));
     const [criteriaText,setCriteriaText]=React.useState(list(plan.criteria).join('\n'));
     const [requirements,setRequirements]=React.useState(typeof plan.requirements==='string'?plan.requirements:'');
     const [deliverablesText,setDeliverablesText]=React.useState(JSON.stringify(list(plan.deliverables),null,2));
@@ -763,18 +857,22 @@ export function createFleetViews(React) {
         if(!inputs||typeof inputs!=='object'||Array.isArray(inputs)){setLocalError(L('输入须为 JSON 对象。','Inputs must be a JSON object.'));return;}
         if(JSON.stringify(inputs)!==JSON.stringify(plan.inputs||{}))fields.inputs=inputs;
       }else if(Object.keys(plan.inputs||{}).length)fields.inputs={};
+      for(const key of referenceKeys)if(JSON.stringify(list(plan[key]))!==JSON.stringify(references[key]))fields[key]=references[key];
+      const nodes=list(plan.nodes).map((node,i)=>{const next={...node};writeReferenceFields(next,references.nodes[i]);return next;});
+      if(JSON.stringify(references.nodes)!==JSON.stringify(routingFields(plan).nodes))fields.nodes=nodes;
       if(!Object.keys(fields).length){setLocalError(L('没有检测到修改。','No changes detected.'));return;}
       setLocalError(null);setSubmitting(true);
       try{await onSubmit({seriesId:series.id,expectedRevision:original.revision,fields});}
       finally{setSubmitting(false);}
     }
     return h('form',{onSubmit:submit,'data-fleet-series-config-form':series?.id||''},h('div',{className:'fl-stack'},
-      h('p',{className:'fl-help'},L('只推广本次修改的字段到系列配置；随后创建的期次继承新版本，已启动期次不受影响。时间规则归宿主原生管理。','Only the fields changed here are promoted to the series configuration; future occurrences inherit the new version and started Tickets are unaffected. Timing stays with the host native manager.')),
+      h('p',{className:'fl-help'},series.triggerSeriesId?timingSummary(series,L):L('只推广本次修改的字段到系列配置；随后创建的期次继承新版本，已启动期次不受影响。时间规则归宿主原生管理。','Only the fields changed here are promoted to the series configuration; future occurrences inherit the new version and started Tickets are unaffected. Timing stays with the host native manager.')),
       h('label',{className:'fl-field'},L('任务目标','Goal'),h('textarea',{value:goal,disabled:locked,rows:3,required:true,'data-fleet-series-goal':'',onChange:e=>setGoal(e.target.value)})),
       h('label',{className:'fl-field'},L('交付物（JSON 数组）','Deliverables (JSON array)'),h('textarea',{value:deliverablesText,disabled:locked,rows:3,'data-fleet-series-deliverables':'',onChange:e=>setDeliverablesText(e.target.value)})),
       h('label',{className:'fl-field'},L('整单验收标准（每行一条）','Ticket-wide criteria (one per line)'),h('textarea',{value:criteriaText,disabled:locked,rows:3,'data-fleet-series-criteria':'',onChange:e=>setCriteriaText(e.target.value)})),
       h('label',{className:'fl-field'},L('补充要求','Requirements'),h('textarea',{value:requirements,disabled:locked,rows:2,'data-fleet-series-requirements':'',onChange:e=>setRequirements(e.target.value)})),
       h('label',{className:'fl-field'},L('输入（JSON 对象，可空）','Inputs (JSON object, optional)'),h('textarea',{value:inputsText,disabled:locked,rows:3,'data-fleet-series-inputs':'',onChange:e=>setInputsText(e.target.value)})),
+      h('details',null,h('summary',null,L('上游依赖','Upstream dependencies')),h('fieldset',{className:'fl-routing',disabled:locked},dependencyFields({L,data,seriesId:series.id,form:references,onChange:setReferences}))),
       (localError||error)&&h('p',{className:'fl-notice',role:'alert','data-fleet-series-config-error':''},localError||error),
       h('div',{className:'fl-dialog-actions'},
         onCancel&&button(L('取消','Cancel'),onCancel,{className:'fl-btn fl-btn-ghost',disabled:submitting}),
@@ -799,8 +897,8 @@ export function createFleetViews(React) {
   }
   // Dashboard redesign v0.1: status-grouped dense list / board helpers (no priority field).
   const GROUP_ORDER=['waiting','attention','running','draft','delivered','stopped'];
-  const groupOf=t=>hasIssues(t)?'attention':waiting(t).length?'waiting':t.status==='running'?'running':t.status==='draft'?'draft':t.status==='delivered'?'delivered':'stopped';
-  const groupLabel=(k,L)=>({waiting:L('等待决定','Waiting for review'),attention:L('待处理问题','Needs attention'),running:L('进行中','In progress'),draft:L('草稿','Draft'),delivered:L('已交付','Delivered'),stopped:L('已停止','Stopped')}[k]);
+  const groupOf=t=>hasIssues(t)?'attention':waiting(t).length||waitingUpstream(t)?'waiting':t.status==='running'?'running':t.status==='draft'?'draft':t.status==='delivered'?'delivered':'stopped';
+  const groupLabel=(k,L)=>({waiting:L('等待中','Waiting'),attention:L('待处理问题','Needs attention'),running:L('进行中','In progress'),draft:L('草稿','Draft'),delivered:L('已交付','Delivered'),stopped:L('已停止','Stopped')}[k]);
   const toneColor=k=>({waiting:'var(--fl-waiting)',attention:'var(--fl-danger)',running:'var(--fl-running)',delivered:'var(--fl-success)'}[k]||'var(--fl-muted)');
   const pips=nodes=>h('span',{className:'fl-pips','aria-hidden':true},...list(nodes).map((n,i)=>h('i',{key:i,'data-s':n.status||'pending'})));
   function avstack(nodes,agents) {
@@ -817,6 +915,7 @@ export function createFleetViews(React) {
   function ticketStage(ticket,group,L) {
     const nodes = list(ticket.nodes);
     if (group==='waiting') {
+      if(waitingUpstream(ticket))return L('等待上游交付','Awaiting upstream delivery');
       const gate = waiting(ticket)[0];
       return gate.reviewer?.kind==='agent' ? L('等待智能体审核','Waiting for Agent review') : L('等待人工审批','Waiting for approval');
     }
@@ -908,6 +1007,7 @@ export function createFleetViews(React) {
     if(wait)return line('waiting',`${L('等待审批','Waiting for review')} · ${wait.id}`);
     if(running)return line('running',`${L('进行中','Running')} · ${running.id}`,goto(running.id));
     if(ticket.status==='delivered')return line('delivered',L('结果已交付','Results delivered'));
+    if(waitingUpstream(ticket))return line('waiting',L('已启用自动启动，等待上游交付','Automatic start enabled, awaiting upstream delivery'));
     if(ticket.status==='draft')return line('draft',L('草稿待启动','Draft awaiting start'));
     if(ticket.status==='stop-requested')return line('stopped',L('正在停止','Stopping'));
     if(ticket.status==='stopped')return line('stopped',L('已停止','Stopped'));
@@ -1048,7 +1148,7 @@ export function createFleetViews(React) {
   }
   function flow(nodes,gates,o,interactive=true,agents={}) {
     const {L,ui,setUI}=o;
-    const levels=graphLevels(nodes,gates);
+    const levels=graphLevels(nodes,gates,o.logicGates);
     const levelOf=id=>levels.findIndex(group=>group.some(node=>node.id===id));
     const display=[];
     levels.forEach((level,index)=>{
@@ -1060,7 +1160,7 @@ export function createFleetViews(React) {
       ...(col.type==='nodes'?col.items.map(node=>h(interactive?'button':'div',{
         type:interactive?'button':undefined,key:node.id,className:'fl-node','data-fleet-node':node.id,
         'aria-pressed':interactive?ui.nodeId===node.id:undefined,onClick:interactive?()=>setUI({nodeId:node.id,attemptId:null,gateId:null}):undefined},
-        row(h('strong',null,node.id),status(node.status||'pending',L)),h('p',{className:'fl-muted'},node.role),
+        row(h('strong',null,node.id),node.status==='pending'&&o.nodeDependencyReadiness?.[node.id]?.ready===false?badge(L('等待上游','Waiting for upstream'),'waiting'):status(node.status||'pending',L)),h('p',{className:'fl-muted'},node.role),
         h('p',{className:'fl-node-text','data-fleet-node-summary':node.id},node.task?.summary||firstSentence(node.task?.prompt)||text(node.task||{})),
         modelLine(o,node,agents,L),
         planChips(node.task,L),
@@ -1102,6 +1202,7 @@ export function createFleetViews(React) {
           attempts.length>1&&h('select',{'aria-label':L('执行轮次','Execution attempt'),value:attempt?.id||'',onChange:e=>setUI({attemptId:e.target.value})},...attempts.map((a,i)=>h('option',{key:a.id,value:a.id},`${i+1} · ${L(...names[a.status]||[a.status,a.status])}`))),
           attempt?.sessionId&&button(L('打开完整对话 ↗','Open full conversation ↗'),()=>openChat(attempt.sessionId),{'data-fleet-node-session':attempt.sessionId,className:'fl-btn fl-btn-ghost fl-btn-sm'}),
           !ticket.abandonedAt&&['failed','interrupted','cancelled'].includes(node.status)&&['running','stopped'].includes(ticket.status)&&button(L('重试节点','Retry node'),()=>openDialog({kind:'retry',ticketId:ticket.id,nodeId:node.id})))),
+      attempt?.upstreamTickets?.length?upstreamAttempt(attempt,o):upstreamDetails(node,ticket.nodeDependencyReadiness?.[node.id],ticket,o),
       nodePlanSections(configuredNode||node,ticket,{...o,historical:Boolean(attempt&&frozen)}),
       attempt?.error&&h('p',{className:'fl-notice',role:'alert','data-fleet-thread-error':node.id},text(attempt.error)),
       !attempts.length&&h('p',{className:'fl-muted fl-small fl-card-pad'},L('任务派发后，可从“打开完整对话”查看执行进展。','After dispatch, open the full conversation to follow progress.')));
@@ -1148,6 +1249,51 @@ export function createFleetViews(React) {
         completion.handoff&&h('details',{className:'fl-spaced'},h('summary',null,L('交接说明','Handoff')),readValue(completion.handoff)))
         :h('p',{className:'fl-help'},L('该轮次未提交结构化完成证据；执行结束不代表验收通过。','This attempt submitted no structured completion evidence; finished execution is not acceptance.')));
   }
+  const waitingUpstream=(ticket)=>ticket.status==='draft'&&Boolean(ticket.dependencyAuthorization)&&ticket.dependencyReadiness?.ready===false;
+  const needsSeriesSchedule=(ticket,plan,data)=>planHasSeries(plan)&&!ticketSeries(ticket,data).some(s=>s.role==='occurrence');
+  const seriesStartHint=L=>L('请安排执行或跟随上游系列，以便为每期匹配上游 Ticket。','Schedule this draft or follow an upstream series to bind Tickets for each occurrence.');
+  function upstreamDetails(owner,readiness,ticket,o) {
+    const {L,data}=o;
+    const ids=readiness?.ticketIds??[...new Set([...list(owner?.ticketDependencies),...list(owner?.ticketDependencySeries).map(id=>ticket.dependencyBindings?.[id]).filter(Boolean)])];
+    const seriesIds=readiness?.waitingSeriesIds??list(owner?.ticketDependencySeries).filter(id=>!ticket.dependencyBindings?.[id]);
+    if(!ids.length&&!seriesIds.length)return null;
+    return h('div',{className:'fl-stack','data-fleet-upstream':owner.id||ticket.id},
+      ...ids.map(id=>{
+        const source=list(data?.tickets).find(t=>t.id===id);
+        return h('div',{key:id,className:'fl-notice'},h('div',{className:'fl-row'},source?ticketLink(source,o,{label:`${ticketTitle(source)} · ${id}`,'data-fleet-open-upstream':id}):h('code',null,id),
+          badge((readiness?!list(readiness.waitingTicketIds).includes(id):source?.status==='delivered')?L('已交付','Delivered'):L('等待上游交付','Awaiting upstream delivery'),(readiness?!list(readiness.waitingTicketIds).includes(id):source?.status==='delivered')?'success':'waiting')),
+          ...list(source?.deliverables).map(d=>h('div',{key:d.index,className:'fl-small'},d.label,d.latest&&` · v${d.latest.version}`,d.reviewStatus==='skipped'&&` · ${L('已跳过','Skipped')}`)));
+      }),...seriesIds.map(id=>h('div',{key:id,className:'fl-row'},badge(L('等待期次匹配','Awaiting occurrence match'),'waiting'),button(list(data?.series?.items).find(s=>s.id===id)?.name||id,()=>o.navigate('schedules',{scheduleId:id}),{className:'fl-title-button'}))));
+  }
+  function upstreamAttempt(attempt,o) {
+    const {L,data}=o;
+    if(!attempt?.upstreamTickets?.length)return null;
+    return h('section',{className:'fl-card-pad fl-stack','data-fleet-upstream-attempt':attempt.id},h('h3',null,L('本轮使用的上游交付物','Upstream deliverables used in this attempt')),
+      ...attempt.upstreamTickets.map(source=>{const ticket=list(data?.tickets).find(t=>t.id===source.ticketId);
+        return h('div',{className:'fl-stack',key:source.ticketId},ticket?ticketLink(ticket,o,{label:`${ticketTitle(ticket)} · ${ticket.id}`,'data-fleet-open-upstream':ticket.id}):source.ticketId,
+          ...list(source.deliverables).map(item=>h('div',{key:item.index},h('strong',null,item.label),item.version!=null?h('div',{className:'fl-small'},`v${item.version} · `,h('code',null,item.sha256),fileLink(o,snapshotTarget(o,item.snapshotPath),item.snapshotPath)):badge(L('未绑定','Unbound')))),
+          source.overrideReason&&h('p',{className:'fl-help'},source.overrideReason));}));
+  }
+  function FollowSeries({ticket,data,L,busy,act}) {
+    const ids=[...new Set([ticket.plan,...list(ticket.plan?.nodes)].flatMap(owner=>list(owner?.ticketDependencySeries)))];
+    const [chosen,setChosen]=React.useState('');
+    const trigger=ids.length===1?ids[0]:ids.includes(chosen)?chosen:'';
+    if(!ids.length)return null;
+    const existing=list(data.series?.items).find(s=>s.triggerSeriesId===trigger&&s.sourceTicketId===ticket.id&&['active','paused'].includes(s.status));
+    return h('div',{className:'fl-row'},ids.length>1&&h('label',{className:'fl-field'},L('触发系列','Trigger series'),h('select',{value:trigger,disabled:busy,onChange:e=>setChosen(e.target.value),'data-fleet-follow-trigger':''},
+      h('option',{value:''},L('选择触发系列…','Select a trigger series…')),...ids.map(id=>h('option',{key:id,value:id},data.series?.items?.find(s=>s.id===id)?.name||id)))),
+      button(existing?L('已跟随上游系列','Following upstream series'):L('跟随上游系列','Follow upstream series'),()=>act('series-follow',{sourceTicketId:ticket.id,triggerSeriesId:trigger,expectedRevision:ticket.revision,name:ticketTitle(ticket)}),{disabled:busy||!trigger||!!existing,'data-fleet-series-follow':ticket.id}));
+  }
+  function routeResults(ticket,o) {
+    const {L}=o;
+    return list(ticket.logicGates).map(gate=>h('section',{key:gate.id,className:'fl-card fl-card-pad','data-fleet-logic-gate':gate.id},
+      h('h3',null,`${L('逻辑关卡','Logic gate')} · ${gate.id}`),h('p',{className:'fl-help'},`${L('来源步骤','Source step')} · ${gate.from}`),
+      ...gate.routes.map(route=>h('details',{key:route.id,className:'fl-spaced','data-fleet-route':route.id},
+        h('summary',null,h('strong',null,route.id),route.status==='completed'?badge(L('已执行','Executed'),'success'):route.status==='skipped'&&route.matched===false?badge(L('未命中 · 已跳过','Unmatched · skipped')):status(route.status,L)),
+        gate.attemptId&&kv(L('判定所用轮次','Source attempt'),gate.attemptId),
+        h('p',{className:'fl-small fl-mono'},`${route.condition.path.map(key=>JSON.stringify(key)).join(' → ')} ${route.condition.operator}${route.condition.operator==='exists'?'':` ${JSON.stringify(route.condition.value)}`}`),
+        h('div',{className:'fl-row'},...route.to.map(id=>button(id,()=>o.setUI({nodeId:id,gateId:null,attemptId:null}),{key:id,className:'fl-title-button'})))))));
+  }
   function ticketView(o) {
     const {L,data,ui,setUI,navigate,openDialog,act,busy}=o;
     const ticket=list(data.tickets).find(t=>t.id===ui.ticketId);
@@ -1160,24 +1306,24 @@ export function createFleetViews(React) {
     const node=nodes.find(n=>n.id===ui.nodeId)||nodes[0];
     const selectedGate=ui.gateTicketId===ticket.id&&!ui.nodeId?gates.find(g=>g.id===ui.gateId):null;
     const selectGate=gate=>setUI({gateTicketId:ticket.id,gateId:gate.id,nodeId:null,attemptId:null});
-    const flowOptions={...o,selectGate,ui:{...ui,nodeId:selectedGate?null:node?.id,gateId:selectedGate?.id}};
+    const flowOptions={...o,nodeDependencyReadiness:ticket.nodeDependencyReadiness,logicGates:ticket.logicGates,selectGate,ui:{...ui,nodeId:selectedGate?null:node?.id,gateId:selectedGate?.id}};
     // P-46 delivery projection: registry rows, blocked reasons and the human override exit.
     const deliverables=list(ticket.deliverables),delivery=ticket.delivery;
     const gap=deliveryGapInfo(ticket);
     const settlementBlocked=gap.allCompleted&&gap.allPassed&&gap.blocked;
     const latestDelivery=list(delivery?.history).at(-1);
     const exhaustedEvents=list(ticket.activity).filter(a=>a.type==='rework-exhausted');
-    const sources=gate=>list(gate.from).map(id=>nodes.find(n=>n.id===id));
-    const reviewArtifacts=gate=>Object.entries(ticket.artifacts||{}).filter(([,artifact])=>list(gate.from).includes(artifact.nodeId)&&list(artifact.versions).length);
+    const sources=gate=>reviewSources(ticket,gate);
+    const reviewArtifacts=gate=>reviewSourceArtifacts(ticket,gate);
     const subjectLabel=gate=>{
       const artifacts=reviewArtifacts(gate);
       if(!artifacts.length)return list(gate.from).join(', ');
       const [id,first]=artifacts[0];
       return (first.sourcePath||first.label||id)+(artifacts.length>1?' +'+(artifacts.length-1):'');
     };
-    const reviewable=gate=>ticket.status==='running'&&!ticket.execution?.legacy?.readOnly&&!gate.humanOverride&&(gate.status!=='passed'||['stale','unreviewed'].includes(gate.coverage));
-    const humanReview=gate=>reviewable(gate)&&gate.reviewer?.kind==='human'&&sources(gate).every(n=>n?.status==='completed');
-    const canApprove=gate=>!gate.requireEvidence||sources(gate).every(n=>list(n?.attempts).at(-1)?.completion);
+    const reviewable=gate=>sourcesReady(ticket,gate)&&gate.status!=='skipped'&&ticket.status==='running'&&!ticket.execution?.legacy?.readOnly&&!gate.humanOverride&&(gate.status!=='passed'||['stale','unreviewed'].includes(gate.coverage));
+    const humanReview=gate=>reviewable(gate)&&gate.reviewer?.kind==='human';
+    const canApprove=gate=>!gate.requireEvidence||sources(gate).filter(n=>n?.status==='completed').every(n=>list(n.attempts).at(-1)?.completion);
     const showSubject=(gate,event)=>{
       const workbench=event.currentTarget.closest('[data-fleet-ticket-card]')?.parentElement;
       selectGate(gate);
@@ -1237,6 +1383,10 @@ export function createFleetViews(React) {
               button(L('审核通过','Review passed'),()=>openDialog({kind:'review',ticketId:ticket.id,gateId:gate.id,decision:'passed'}),{disabled:busy||!canApprove(gate),'data-fleet-review-passed':gate.id}),
               button(L('退回并说明','Return with feedback'),()=>openDialog({kind:'review',ticketId:ticket.id,gateId:gate.id,decision:'returned'}),{disabled:busy}))));
     };
+    const isOccurrence=ticketSeries(ticket,data).some(s=>s.role==='occurrence');
+    const requiresSchedule=!isOccurrence&&planHasSeries(ticket.plan);
+    const dependencyAction=ticket.dependencyAuthorization?'dependency-disable':'dependency-enable';
+    const ordinaryDraft=draft&&!ticket.abandonedAt&&!isOccurrence;
     const todoGates=gates.filter(humanReview);
     const gateTodos=todoGates.length>0&&h('div',{className:'fl-todos','data-fleet-todos':ticket.id},...todoGates.map(gate=>
       h('div',{className:'fl-todo fl-row',key:gate.id,'data-fleet-todo':gate.id},
@@ -1247,11 +1397,12 @@ export function createFleetViews(React) {
     return h('div',{className:'fl-stack'},!validPlan&&legacyPlan({...o,draft:ticket,onRepair:base=>act('draft-repair',{ticketId:base.id,expectedRevision:base.revision,sessionId:base.originSessionId}),onRegenerate:base=>act('draft-regenerate',{ticketId:base.id,expectedRevision:base.revision,sessionId:base.originSessionId}),onOpenTicket:id=>navigate('ticket',{ticketId:id,nodeId:null})}),
       h('section',{className:'fl-card fl-card-pad','data-fleet-ticket-card':ticket.id},
         h('div',{className:'fl-row fl-between fl-ticket-meta'},row(o.surface==='side-pane'?null:button(L('← 任务','← Tickets'),()=>navigate('tickets'),{className:'fl-btn fl-btn-ghost'}),h('span',{className:'fl-mono fl-muted fl-small'},ticket.id),status(ticket.status,L),ticket.abandonedAt&&badge(L('已放弃执行','Abandoned'),'neutral')),row(
-          draft&&validPlan&&!ticket.abandonedAt&&button(L('确认并启动','Confirm and start'),()=>openDialog({kind:'start',ticketId:ticket.id}),{className:'fl-btn fl-btn-primary',disabled:busy}),
+          draft&&validPlan&&!ticket.abandonedAt&&button(L('确认并启动','Confirm and start'),()=>openDialog({kind:'start',ticketId:ticket.id}),{className:'fl-btn fl-btn-primary',disabled:busy||requiresSchedule||ticket.dependencyReadiness?.ready===false,title:requiresSchedule?seriesStartHint(L):undefined}),
+           ordinaryDraft&&!requiresSchedule&&!!ticket.plan?.ticketDependencies?.length&&button(ticket.dependencyAuthorization?L('关闭依赖自动启动','Disable automatic start'):L('上游交付后自动启动','Enable start after upstream delivery'),()=>act(dependencyAction,{ticketId:ticket.id,expectedRevision:ticket.revision}),{disabled:busy||(!ticket.dependencyAuthorization&&!validatePlan(ticket.plan,{mode:'start'}).valid),'data-fleet-dependency-action':dependencyAction}),
           draft&&!ticket.abandonedAt&&validatePlan(ticket.plan,{mode:'start'}).valid&&button(L('安排执行','Schedule'),()=>openDialog({kind:'schedule',ticketId:ticket.id}),{disabled:busy||!!scheduleUnavailable,'data-fleet-schedule-entry':ticket.id,title:scheduleUnavailable||L('按固定钟点一次性或周期执行','Run once or recurring at a fixed wall-clock time')}),
           validPlan&&button(editable?L('修改草稿','Edit draft'):L('查看计划','View plan'),()=>openDialog({kind:'revise',ticketId:ticket.id,ticket,ticketRevision:ticket.revision}),{disabled:busy}),
           ticket.status==='running'&&button(L('停止任务','Stop task'),()=>act('stop',{ticketId:ticket.id}),{disabled:busy,className:'fl-btn fl-btn-danger'}),
-          ticket.status==='stopped'&&!ticket.abandonedAt&&button(L('恢复执行','Resume'),()=>act('resume',{ticketId:ticket.id}),{disabled:busy||!validPlan,className:'fl-btn fl-btn-primary'}),
+          ticket.status==='stopped'&&!ticket.abandonedAt&&button(L('恢复执行','Resume'),()=>act('resume',{ticketId:ticket.id}),{disabled:busy||!validPlan||ticket.dependencyReadiness?.ready===false,className:'fl-btn fl-btn-primary'}),
           ['draft','stopped'].includes(ticket.status)&&(ticket.abandonedAt
             ?button(L('恢复此 Ticket','Restore Ticket'),()=>act('unabandon',{ticketId:ticket.id,expectedRevision:ticket.revision}),{disabled:busy,'data-fleet-unabandon':ticket.id})
             :button(L('放弃执行','Abandon execution'),()=>openDialog({kind:'abandon',ticketId:ticket.id,expectedRevision:ticket.revision}),{disabled:busy,className:'fl-btn fl-btn-danger','data-fleet-abandon':ticket.id})))),
@@ -1261,6 +1412,9 @@ export function createFleetViews(React) {
         gateTodos,
         ticket.goal&&ticketTitle(ticket)!==ticket.goal?h('p',{className:'fl-goal'},text(ticket.goal)):null,
         ticketBlocker(ticket,o),
+         ordinaryDraft&&requiresSchedule&&h(FollowSeries,{key:ticket.id,ticket,data,L,act,busy:busy||!validatePlan(ticket.plan,{mode:'start'}).valid}),
+         draft&&requiresSchedule&&h('p',{className:'fl-help'},seriesStartHint(L)),
+         upstreamDetails(ticket.snapshot||ticket.plan,ticket.dependencyReadiness,ticket,o),
 
         (deliverables.length>0||delivery?.override||latestDelivery)&&h('div',{className:'fl-spaced','data-fleet-deliverables':ticket.id},
         h('div',{className:'fl-row fl-between'},h('h3',null,L('交付物','Deliverables')),h('span',{className:'fl-small fl-muted'},`${L('交付目录','Delivery target')}：${ticket.inputs?.deliveryTarget||L('Ticket 交付区','Ticket delivery area')}`)),
@@ -1273,7 +1427,8 @@ export function createFleetViews(React) {
             h('span',{className:'fl-cell'},badge(L(...(deliverableStatusNames[item.reviewStatus]||[item.reviewStatus,item.reviewStatus])),deliverableStatusTones[item.reviewStatus]||'neutral')),
             h('span',{className:'fl-cell'},item.latest?badge(`v${item.latest.version}`):h('span',{className:'fl-small fl-muted'},L('未提交','None')))),
           h('div',{className:'fl-dbody'},
-            deliverableHumanLayer(item,L,o),
+            item.whenNodeRuns&&kv(L('对应步骤','Required when step runs'),item.whenNodeRuns),
+             deliverableHumanLayer(item,L,o),
             item.latest?h(React.Fragment,null,
               h('p',{className:'fl-small fl-muted'},`${L('哈希','Hash')} ${shortHash(item.latest.sha256)} · ${L('提交','Submitted')} ${timestamp(item.latest.submittedAt,L)}`),
               h('div',{className:'fl-spaced fl-row'},
@@ -1297,7 +1452,7 @@ export function createFleetViews(React) {
           h('p',{className:'fl-small'},`${L('最近交付','Latest delivery')} ${timestamp(latestDelivery.time,L)} → ${latestDelivery.target||L('Ticket 交付区','Ticket delivery area')}`),
           h('div',{className:'fl-row'},fileLink(o,latestDelivery.manifestPath,`${L('清单','Manifest')} ↗`,{className:'fl-btn fl-btn-ghost fl-mono'}),fileLink(o,latestDelivery.receiptPath,`${L('回执','Receipt')} ↗`,{className:'fl-btn fl-btn-ghost fl-mono'})))),
         draft&&h('p',{className:'fl-help'},L('下方为此 Ticket 的计划。启动时冻结配置，随后派发智能体。','This Ticket’s plan is previewed below. Starting freezes its configuration before dispatch.'))),
-      h('div',{className:'fl-workbench'},h('div',{className:'fl-stack'},h('section',{className:'fl-card'},h('div',{className:'fl-card-head'},h('h2',null,L('任务流程','Task flow')),row(ticket.execution&&badge(ticket.snapshot?`${L('启动快照','Snapshot')} v${ticket.snapshot.configRevision}`:L('冻结配置','Frozen configuration')),badge(`${nodes.length} ${L('节点','nodes')}`))),flow(nodes,gates,flowOptions,true,ticket.snapshot?.agents||ticket.plan?.agents||{}),
+      h('div',{className:'fl-workbench'},h('div',{className:'fl-stack'},h('section',{className:'fl-card'},h('div',{className:'fl-card-head'},h('h2',null,L('任务流程','Task flow')),row(ticket.execution&&badge(ticket.snapshot?`${L('启动快照','Snapshot')} v${ticket.snapshot.configRevision}`:L('冻结配置','Frozen configuration')),badge(`${nodes.length} ${L('节点','nodes')}`))),flow(nodes,gates,flowOptions,true,ticket.snapshot?.agents||ticket.plan?.agents||{}),...routeResults(ticket,o),
         )),
         selectedGate?gateCard(selectedGate):draft&&!ui.nodeId?h('section',{className:'fl-card fl-card-pad'},h('h2',null,L('执行准备','Ready to execute')),h('p',{className:'fl-muted fl-spaced'},L('先核对任务、角色映射和验收标准。执行对话会在任务启动后建立。','Review the goal, role mapping and acceptance criteria. Execution Sessions are created after starting.')),
           ...nodes.map(node=>kv(`${node.id}${node.role?` · ${node.role}`:''}`,node.agentId||L('未分配','Unassigned')))):nodeThread(ticket,node,o)),
@@ -1549,7 +1704,7 @@ export function createFleetViews(React) {
     if(d.kind==='series-config'){
       const series=list(data.series?.items).find(s=>s.id===d.seriesId);
       if(!series)return h(Modal,{title,onClose:close,busy,L},empty(L('计划不存在或已删除','Schedule not found or deleted')));
-      return h(Modal,{title,onClose:close,busy,L},h(SeriesConfigForm,{L,series,busy,error:ui.dialogError,onCancel:close,onSubmit:async args=>{await act('series-update',args);}}));
+      return h(Modal,{title,onClose:close,busy,L},h(SeriesConfigForm,{L,data,series,busy,error:ui.dialogError,onCancel:close,onSubmit:async args=>{await act('series-update',args);}}));
     }
     if(d.kind==='series-delete')return h(Modal,{title,onClose:close,busy,L},h('form',{onSubmit:async event=>{event.preventDefault();await act('series-delete',{seriesId:d.seriesId});}},h('div',{className:'fl-stack'},
       h('p',null,L(`删除计划「${d.name||d.seriesId}」将停止后续建票；已有期次记录与 Ticket 保留。`,`Deleting schedule “${d.name||d.seriesId}” stops future Ticket creation; existing occurrence records and Tickets are retained.`)),
@@ -1564,12 +1719,12 @@ export function createFleetViews(React) {
     else if(d.kind==='pass')fields.push(h('p',{key:'review'},`${d.gateId} · `+L('这项决定记录为人工通过，原有和后续智能体审核意见继续保留。','This records a human override and retains previous and subsequent Agent reviews.')));
     else if(d.kind==='review'){
       const gate=list(ticket?.gates).find(g=>g.id===d.gateId);
-      const bindable=Object.entries(ticket?.artifacts??{}).filter(([,a])=>list(gate?.from).includes(a.nodeId)).map(([id,a])=>{const v=list(a.versions).at(-1);return `${id} v${v?.version} · ${shortHash(v?.sha256)}`;});
+      const bindable=reviewSourceArtifacts(ticket,gate).map(([id,a])=>{const v=list(a.versions).at(-1);return `${id} v${v?.version} · ${shortHash(v?.sha256)}`;});
       fields.push(field(d.decision==='passed'?L('审核证据','Review evidence'):L('退回原因与证据','Feedback and evidence'),'evidence','',{required:true,multiline:true}),
         h('p',{key:'bind',className:'fl-help'},bindable.length?L(`缺省自动绑定最新产物版本：${bindable.join(' · ')}。`,`Auto-binds the latest artifact versions by default: ${bindable.join(' · ')}.`):L('当前没有可绑定的产物版本。','No artifact versions are available to bind.')));
     }
     else if(d.kind==='deliver-override'){
-      const rows=list(ticket?.deliverables).filter(r=>!r.artifactId),stale=list(ticket?.gates).filter(g=>g.coverage==='stale');
+      const rows=list(ticket?.deliverables).filter(r=>!r.artifactId&&r.reviewStatus!=='skipped'),stale=list(ticket?.gates).filter(g=>g.coverage==='stale');
       fields.push(h('p',{key:'gaps'},L('此操作显式放行交付，记录来源、理由与版本缺口；不伪造审核结论。','This explicitly releases delivery and records the source, reason and version gaps; it never fabricates a review conclusion.')),
         (rows.length>0||stale.length>0)&&h('ul',{key:'list'},...rows.map(r=>h('li',{key:`u${r.index}`},`${L('缺绑定','Unbound')}：${r.label}`)),...stale.map(g=>h('li',{key:g.id},`${L('结论过期','Stale review')}：${g.id}`))),
         field(L('覆盖理由','Override reason'),'reason','',{required:true,multiline:true}));
@@ -1676,7 +1831,14 @@ export function createFleetViews(React) {
       if(!current.current.dirty)return current.current.base;
       const state=current.current,stamp=version.current;
       let plan;
-      try{plan=makePlan(state);}catch{setError(L('JSON 格式有误，请检查配置后保存。','Invalid JSON. Check the configuration before saving.'));return null;}
+      try{
+        plan=makePlan(state);
+        if(state.values.routing){
+          plan=applyRouting(plan,state.values.routing,L);
+          const validation=validatePlan(plan,{mode:'save'});
+          if(!validation.valid)throw new Error(validation.errors.map(item=>`${item.path} · ${item.message}`).join('\n'));
+        }
+      }catch(error){setError(error.message);return null;}
       if(!plan.goal.trim()){setError(L('请填写任务目标。','Please enter a goal.'));return null;}
       // P-67：recurring 系列成员先问范围；取消保留输入不保存。一次性按原流程直接保存。
       const choices=ticketSeries(incoming,o.data).filter(needsSaveScope);
@@ -1715,7 +1877,7 @@ export function createFleetViews(React) {
     const agentFor=node=>Object.hasOwn(agents,node.agentId)?agents[node.agentId]:null;
     const modelCatalog=o.data?.catalog?.modelCatalog??o.catalog?.modelCatalog;
     const firstSentence=value=>String(value||'').split(/[。．!！?？;；\n]/)[0].trim();
-    const levels=graphLevels(nodes,gates);
+    const levels=graphLevels(nodes,gates,viewPlan.logicGates);
     const lines=s=>String(s??'').split('\n').map(x=>x.trim()).filter(Boolean);
     const openEdit=kind=>{
       if(locked||editing===kind)return;
@@ -2035,7 +2197,10 @@ export function createFleetViews(React) {
               level.length>1?h('div',{className:'fl-ggroup',key:`group-${i}`},h('span',{className:'fl-gtab'},`${L('并行','Parallel')} · ${level.length}`),...level.map(nodeCard)):nodeCard(level[0]),
               ...gates.filter(gate=>{const froms=list(gate.from).map(id=>levels.findIndex(group=>group.some(node=>node.id===id)));return froms.length&&froms.every(l=>l>=0)&&Math.max(...froms)===i;}).flatMap(gate=>[h('div',{className:'fl-glink',key:`gate-link-${gate.id}`}),gateCard(gate)])]))
             :h('p',{className:'fl-help'},L('尚未配置节点','No nodes configured yet'))),
-        conflict&&h('p',{className:'fl-notice',role:'alert'},L('草稿已有更新。你的输入已保留，请复制需要的内容后重新加载最新版本再修改。','The draft has changed. Your input is preserved. Copy any changes you need, then reload the latest version before editing.')),
+        (editable||planHasSeries(viewPlan)||viewPlan.ticketDependencies?.length||viewPlan.logicGates?.length||nodes.some(n=>n.ticketDependencies?.length)||deliverables.some(d=>d?.whenNodeRuns))&&h('details',{className:'fl-dcard','data-fleet-routing-editor':''},
+           h('summary',null,L('上游依赖与条件路线','Upstream dependencies and conditional routes')),
+           routingEditor({L,data:o.data,plan:viewPlan,ticketId:base.id,form:values.routing||routingFields(viewPlan),onChange:form=>change('routing',form),locked})),
+         conflict&&h('p',{className:'fl-notice',role:'alert'},L('草稿已有更新。你的输入已保留，请复制需要的内容后重新加载最新版本再修改。','The draft has changed. Your input is preserved. Copy any changes you need, then reload the latest version before editing.')),
         (error||o.error)&&h('p',{className:'fl-notice',role:'alert'},error||o.error),
         note&&h('p',{className:'fl-notice',role:'status'},note),
         h('p',{className:'fl-help'},L('应用或保存即你的确认。保存后可在下方「启动」就地定稿运行，也可在任务页或 /fleet start 启动。','Apply or Save is your confirmation. Once saved, start the run right below; the Ticket page and /fleet start work too.')),
@@ -2044,7 +2209,8 @@ export function createFleetViews(React) {
           h('p',{className:'fl-small fl-muted'},String(values.goal||'').slice(0,120)),
           h('div',{className:'fl-row'},button(incoming.status==='draft'?L('确认启动','Confirm and start'):L('确认恢复','Confirm and resume'),()=>{setStartPhase(null);void o.onStart?.();},{className:'fl-btn fl-btn-primary',disabled:locked||saving||o.busy,'data-fleet-start-submit':''}),button(L('取消','Cancel'),()=>setStartPhase(null),{className:'fl-btn fl-btn-ghost'}))):null,
         startable&&!startCheck.valid&&startPhase===null?h('p',{className:'fl-help','role':'status','data-fleet-start-diagnostics':''},L('启动校验未通过：','Start validation pending: '),...startCheck.errors.slice(0,3).map((e,i)=>h('span',{key:i,className:'fl-small fl-muted'},`${i?' · ':''}${e.path}: ${e.message}${startCheck.errors.length>3&&i===2?L(` 等 ${startCheck.errors.length} 项`,` and ${startCheck.errors.length} more`):''}`))):null,
-        startable&&scheduleUnavailable&&h('p',{role:'status',className:'fl-help','data-fleet-schedule-unavailable':''},scheduleUnavailable),
+        startable&&needsSeriesSchedule(incoming,viewPlan,o.data)&&h('p',{className:'fl-help'},seriesStartHint(L)),
+         startable&&scheduleUnavailable&&h('p',{role:'status',className:'fl-help','data-fleet-schedule-unavailable':''},scheduleUnavailable),
         scopeChoice&&h(ScopePicker,{L,choices:scopeChoice.choices,busy:saving||o.busy,onChoose:chooseScope}),
         scheduleOpen&&h('div',{className:'fl-dcard','data-fleet-draft-schedule-panel':''},
           h('div',{className:'fl-dsec'},L('安排执行','Schedule runs')),
@@ -2053,7 +2219,7 @@ export function createFleetViews(React) {
           h('span',{className:'fl-small fl-muted','data-fleet-draft-state':saving?'saving':dirty?'dirty':'saved'},saving?L('正在保存…','Saving…'):dirty?L('有未保存修改','Unsaved changes'):L('已保存','Saved')),
           h('span',{className:'fl-row',style:{marginLeft:'auto'}},
             button(saving?L('正在保存…','Saving…'):dirty?L('保存修改','Save changes'):L('已保存','Saved'),()=>void save(),{disabled:locked||saving,'data-fleet-draft-save':''}),
-            startable&&button(incoming.status==='draft'?L('启动','Start'):L('恢复运行','Resume'),()=>setStartPhase('confirm'),{className:'fl-btn fl-btn-primary',disabled:locked||saving||o.busy||dirty||!startCheck.valid,'data-fleet-draft-start':'',title:dirty?L('请先保存','Save first'):startCheck.valid?'':startCheck.errors.map(e=>`${e.path}: ${e.message}`).join(' ')}),
+            startable&&button(incoming.status==='draft'?L('启动','Start'):L('恢复运行','Resume'),()=>setStartPhase('confirm'),{className:'fl-btn fl-btn-primary',disabled:locked||saving||o.busy||dirty||!startCheck.valid||needsSeriesSchedule(incoming,viewPlan,o.data)||incoming.dependencyReadiness?.ready===false,'data-fleet-draft-start':'',title:dirty?L('请先保存','Save first'):startCheck.valid?'':startCheck.errors.map(e=>`${e.path}: ${e.message}`).join(' ')}),
             startable&&typeof o.onSchedule==='function'&&button(L('安排执行','Schedule'),()=>setScheduleOpen(value=>!value),{disabled:locked||saving||o.busy||dirty||!startCheck.valid||!!scheduleUnavailable,'data-fleet-draft-schedule':'',title:dirty?L('请先保存','Save first'):scheduleUnavailable||(startCheck.valid?L('按固定钟点一次性或周期执行','Run once or recurring at a fixed wall-clock time'):startCheck.errors.map(e=>`${e.path}: ${e.message}`).join(' '))}),
             button(L('重新加载','Reload'),()=>{detailEdits.current.clear();accept(incoming);setError(null);setNote(null);o.onReload();},{disabled:locked||saving})))),
       popReady&&h('div',{className:'fl-popbackdrop','aria-hidden':true,style:{left:popRect.left,top:popRect.top,width:popRect.width,height:popRect.height}}),
