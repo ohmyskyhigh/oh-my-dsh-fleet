@@ -11,6 +11,8 @@ import { normalizePlan, projectTicket } from '../src/fleet-model.js';
 
 const agent = Object.freeze({ identity: 'actual-dsh-agent' });
 const actualContext = { workspaceId: 'actual-workspace', workspacePath: path.resolve('chat-fixture-workspace'), sessionId: 'actual-session' };
+const scheduleArgs = { ticketId: 'ticket', expectedRevision: 2, name: 'Weekly build', kind: 'weekly', time: '09:30', timeZone: 'Asia/Shanghai', weekdays: [1, 5] };
+const scheduleResult = { seriesId: 'series', scheduleId: 'schedule', sourceTicketId: 'ticket', revision: 1, status: 'active', timing: { kind: 'weekly', weekly: { time: '09:30:00', time_zone: 'Asia/Shanghai', weekdays: [1, 5] } }, scheduledAt: '2030-01-04T01:30:00.000Z' };
 const exampleTicket = () => {
   const plan = normalizePlan({goal:'Test Ticket',agents:{builder:{profile:{instructions:'Build'}}},nodes:[{id:'build',agentId:'builder',dependsOn:[],task:{prompt:'Build'}}]});
   return {id:'ticket',status:'running',plan,activity:[],execution:{currentConfigRevision:1,configurations:{1:{plan,configRevision:1}},nodes:{build:{id:'build',status:'running',attempts:[{id:'attempt',sessionId:'execution-session',status:'running',configRevision:1}],thread:[{id:'message',text:'working'}]}},gates:{}}};
@@ -30,6 +32,7 @@ function harness(options = {}) {
     human: invoke('human', (_ws, _user, action, args) => ({ action, args })),
     submitEvidence: invoke('submitEvidence', { artifacts: [], completion: { evidenceKind: 'agent-report' } }),
     agentStart: invoke('agentStart', (_ws, _sid, id) => projectTicket({ id, workspaceId: actualContext.workspaceId, originSessionId: actualContext.sessionId, status: 'draft', revision: 2, plan: normalizePlan({ goal: 'Test Ticket' }), execution: null, activity: [] })),
+    agentSchedule: invoke('agentSchedule', scheduleResult),
     health: { ready: true, error: null },
   };
   const register = (registry, type) => definition => {
@@ -78,14 +81,14 @@ for (const [command, method, args] of controls) test(`native /fleet ${method} is
   assert.deepEqual(JSON.parse(result.text), { action: method, args });
 });
 
-test('Agent registry exposes only catalog, status, thread, submit, start and draft, with canonical text schema/render', async () => {
+test('Agent registry exposes the seven Fleet tools with canonical text schema/render', async () => {
   const h = harness({ presets: { list: async () => [{ id: 'preset' }] } });
-  assert.deepEqual([...h.tools.keys()], ['fleet_catalog', 'fleet_status', 'fleet_thread', 'fleet_submit', 'fleet_start', 'fleet_draft']);
+  assert.deepEqual(new Set(h.tools.keys()), new Set(['fleet_catalog', 'fleet_status', 'fleet_thread', 'fleet_submit', 'fleet_start', 'fleet_draft', 'fleet_schedule']));
   assert.equal(h.tools.has('fleet_prepare'), false, 'the prepare bypass is removed');
   assert.deepEqual([...h.commands.keys()], ['fleet']);
   for (const forbidden of ['fleet_stop', 'fleet_resume', 'fleet_retry', 'fleet_pass', 'fleet_review', 'fleet_change', 'fleet_root_agent', 'fleet_root_flow']) assert.equal(h.tools.has(forbidden), false);
   assert.equal(h.definitions.length, h.tools.size, 'all tools pass through defineTool');
-  for (const [name, args] of [['fleet_catalog', {}], ['fleet_status', {}], ['fleet_thread', { ticketId: 'ticket', nodeId: 'build' }], ['fleet_submit', {}], ['fleet_start', { ticketId: 'ticket' }], ['fleet_draft', { action: 'read' }]]) {
+  for (const [name, args] of [['fleet_catalog', {}], ['fleet_status', {}], ['fleet_thread', { ticketId: 'ticket', nodeId: 'build' }], ['fleet_submit', {}], ['fleet_start', { ticketId: 'ticket' }], ['fleet_draft', { action: 'read' }], ['fleet_schedule', scheduleArgs]]) {
     const definition = h.tools.get(name), result = await h.tool(name, args);
     parsed(result);
     assert.deepEqual(definition.output.schema, { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } }, `${name} canonical schema`);
@@ -129,6 +132,25 @@ test('tool Workspace and Session identity come from resolved agent context, neve
   assert.ok(callsOf(h, 'read').every(c => c.args[0] === actualContext.workspaceId));
   assert.ok(callsOf(h, 'resolveAgentContext').every(c => c.args[0] === agent));
   assert.equal(callsOf(h, 'human').length, 0);
+});
+
+test('fleet_schedule documents explicit authorization and binds a create to the resolved planning Session', async () => {
+  const h = harness();
+  const definition = h.tools.get('fleet_schedule');
+  assert.match(definition.description, /explicit/i);
+  const { parameters } = definition;
+  assert.deepEqual(Object.keys(parameters).sort(), ['date', 'expectedRevision', 'kind', 'name', 'ticketId', 'time', 'timeZone', 'weekdays']);
+  for (const name of ['expectedRevision', 'kind', 'name', 'ticketId', 'time', 'timeZone']) assert.equal(parameters[name].required, true);
+  assert.deepEqual(parameters.kind.enum, ['at', 'daily', 'weekly']);
+  assert.deepEqual(parsed(await h.tool('fleet_schedule', scheduleArgs)), scheduleResult);
+  assert.deepEqual(callsOf(h, 'agentSchedule'), [{ method: 'agentSchedule', args: [actualContext.workspaceId, actualContext.sessionId, scheduleArgs] }]);
+  assert.equal(callsOf(h, 'human').length, 0);
+  assert.equal(callsOf(h, 'agentStart').length, 0);
+
+  const execution = harness({ owned: true });
+  await assert.rejects(execution.tool('fleet_schedule', scheduleArgs), /Execution Sessions/);
+  assert.equal(callsOf(execution, 'agentSchedule').length, 0);
+  assert.equal(callsOf(execution, 'human').length, 0);
 });
 
 test('execution Sessions may inspect but fleet_draft rejects before parsing or mutating', async () => {
@@ -223,7 +245,7 @@ test('catalog preset failures propagate as awaited tool errors and displayed com
 test('returned disposer unregisters the command and every registered tool', () => {
   const h = harness(); h.dispose();
   assert.equal(h.tools.size, 0); assert.equal(h.commands.size, 0);
-  assert.deepEqual(h.disposals, ['command:fleet', 'tool:fleet_draft', 'tool:fleet_start', 'tool:fleet_submit', 'tool:fleet_thread', 'tool:fleet_status', 'tool:fleet_catalog']);
+  assert.deepEqual(h.disposals, ['command:fleet', ...h.definitions.toReversed().map(({ name }) => `tool:${name}`)]);
 });
 
 test('/fleet new creates the draft Ticket on the spot and steers the native Agent with two-phase instructions', async () => {

@@ -14,13 +14,13 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 
 | 插件 | DeepSeek Harness | 确认版本 |
 | --- | --- | --- |
-| `oh-my-dsh-fleet@0.10.1` | **`0.2.2-rc.5`** | CLI 执行 `dsh --version`。桌面端使用应用自带的 Harness。 |
+| `oh-my-dsh-fleet@0.11.0` | **`0.2.2-rc.5`** | CLI 执行 `dsh --version`。桌面端使用应用自带的 Harness。 |
 
 | 安装渠道 | 桌面端「插件 → 添加插件」 | CLI（将 `web` 换成你的 Profile） |
 | --- | --- | --- |
-| **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.10.1.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.10.1/oh-my-dsh-fleet-0.10.1.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.1.tgz" --ignore-scripts` |
+| **GitHub Release** | 下载 [`oh-my-dsh-fleet-0.11.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.11.0/oh-my-dsh-fleet-0.11.0.tgz)，输入压缩包的绝对路径。 | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scripts` |
 | **GitHub 仓库** | 粘贴 `https://github.com/ohmyskyhigh/oh-my-dsh-fleet`，从默认分支安装。 | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.10.1)** | 输入 `oh-my-dsh-fleet@0.10.1`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.1` |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.11.0)** | 输入 `oh-my-dsh-fleet@0.11.0`。 | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.11.0` |
 
 安装后启用插件，按提示重启桌面应用或 CLI Profile。在侧栏打开 **oh-my-dsh-fleet**，为目标 Workspace 开启 Fleet，然后在该 Workspace 的对话中发送 `/fleet help`。
 
@@ -30,7 +30,7 @@ oh-my-dsh-fleet 是 DeepSeek Harness（DSH）的多 Agent 工作流插件。一�
 
 ```sh
 dsh plugin --profile web remove @dsh-fleet/shell
-dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.1.tgz" --ignore-scripts
+dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.11.0.tgz" --ignore-scripts
 ```
 
 使用原来的 Workspace 文件夹与 Fleet 数据位置。已有 Ticket、模板、计划和 `/fleet` 命令继续使用。 [旧版 0.9.8 下载](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8)
@@ -57,6 +57,8 @@ dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.1.tgz" --ignore-scri
 | ![Agent 审核的输入、检查项和能力配置](.github/assets/fleet-agent-gate.png) | ![人工审核的文件版本、通过和退回入口](.github/assets/fleet-ticket-flow.png) |
 
 ### 模板与定时运营
+
+在创建 Ticket 的对话里说「把这张 Ticket 安排在每周一上海时间 09:00 执行」，Fleet 就会在后台创建计划，并返回系列 ID 和下次执行时间。也可以指定某天执行一次，或每天定时执行。
 
 | 模板复用 | 定时执行 |
 | --- | --- |

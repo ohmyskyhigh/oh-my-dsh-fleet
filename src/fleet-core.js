@@ -335,7 +335,7 @@ export class FleetCore {
   listSeries(ws) { return copy(this.#state.workspaces.find(w => w.id === ws)?.series ?? []); }
   readSeries(ws, id) { return copy(this.#series(ws, id)); }
   findSeriesForTicket(ws, id) { return this.listSeries(ws).find(s => s.sourceTicketId === id || s.occurrences.some(o => o.ticketId === id)) ?? null; }
-  createSeries(ws, { id = randomUUID(), name, plan, sourceTicketId = null, sourceTemplateId, sourceRefs, scheduleId, targetSessionId, timing, host }) {
+  createSeries(ws, { id = randomUUID(), name, plan, sourceTicketId = null, sourceTemplateId, sourceRefs, scheduleId, targetSessionId, timing, host, requestActor }) {
     const w = this.#workspace(ws, true), frozen = planInput(plan, { allowMissingVersion: false }); assertStart(frozen);
     text(id,'series id'); text(name,'series name'); text(scheduleId,'scheduleId'); text(targetSessionId,'targetSessionId');
     requireThat(!w.series?.some(s => s.id === id || s.scheduleId === scheduleId), 'duplicate-id', 'Series or host schedule ID already exists.');
@@ -346,6 +346,11 @@ export class FleetCore {
     sourceRefs = this.#sources(frozen, sourceRefs ?? []);
     requireThat(isRecord(timing) && TIMING_KINDS.includes(timing.kind), 'invalid-input', 'Series needs the host schedule timing.');
     const time = now(), s = {id,workspaceId:ws,revision:1,name,plan:frozen,sourceTicketId,...(sourceTemplateId ? {sourceTemplateId} : {}),sourceRefs:copy(sourceRefs),scheduleId,targetSessionId,timing:copy(timing),status:'active',occurrences:[],createdAt:time,updatedAt:time,...(host ? {host:copy(host)} : {})};
+    if (requestActor) {
+      const source = this.#ticket(ws, sourceTicketId), sourceRevision = source.revision;
+      this.#touch(source);
+      this.#event(source, 'series-created', requestActor, {seriesId: id, scheduleId, sourceRevision});
+    }
     (w.series ??= []).push(s); return copy(s);
   }
   updateSeriesPlan(ws, id, { fields, expectedRevision }) {

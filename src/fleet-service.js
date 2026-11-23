@@ -10,6 +10,23 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const errorText = error => error instanceof Error ? error.message : String(error);
 const guard = (condition, code, message) => { if (!condition) throw new FleetCoreError(code, message); };
+function agentScheduleTiming({kind, time, timeZone, date, weekdays}) {
+  guard(['at', 'daily', 'weekly'].includes(kind), 'invalid-input', 'Choose at, daily or weekly.');
+  guard(typeof time === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time), 'invalid-input', 'Expected local time HH:mm.');
+  guard(typeof timeZone === 'string' && timeZone.trim() && !/^[+-]/.test(timeZone), 'invalid-input', 'An IANA time zone is required.');
+  try { new Intl.DateTimeFormat('en', {timeZone}); }
+  catch { throw new FleetCoreError('invalid-input', 'Expected an IANA time zone.'); }
+  const selector = {time: `${time}:00`, time_zone: timeZone};
+  if (kind === 'at') {
+    guard(typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().startsWith(date), 'invalid-input', 'A one-off schedule requires a valid YYYY-MM-DD date.');
+    selector.date = date;
+  } else guard(date === undefined, 'invalid-input', 'Only a one-off schedule accepts a date.');
+  if (kind === 'weekly') {
+    guard(Array.isArray(weekdays) && weekdays.length && weekdays.every(day => Number.isInteger(day) && day >= 1 && day <= 7), 'invalid-input', 'Select weekly weekdays from 1 (Monday) to 7 (Sunday).');
+    selector.weekdays = [...new Set(weekdays)].sort((a, b) => a - b);
+  } else guard(weekdays === undefined, 'invalid-input', 'Only a weekly schedule accepts weekdays.');
+  return {kind, [kind]: selector};
+}
 const terminal = new Set(['completed', 'failed', 'stopped']);
 const liveServices = new Set();
 const ownerAlive = owner => {
@@ -278,8 +295,31 @@ export class FleetService {
     guard(typeof this.#adapter[method] === 'function','unsupported-profile','Host schedule service is unavailable; scheduling cannot be enabled.');
     try { return await this.#adapter[method](input); } catch (e) { if (['unsupported-profile','invalid-input'].includes(e.code)) throw new FleetCoreError(e.code,e.message); throw e; }
   }
-  async seriesCreate(ws, input) {
+  async agentSchedule(ws, sessionId, args) {
+    guard(typeof sessionId === 'string' && sessionId.length, 'session-scope', 'Scheduling requires a planning Session.');
+    const {ticketId, expectedRevision, name} = args;
+    guard(typeof ticketId === 'string' && ticketId.trim(), 'invalid-input', 'A source Ticket ID is required.');
+    guard(Number.isSafeInteger(expectedRevision) && expectedRevision > 0, 'invalid-input', 'Read the Ticket and supply its positive revision.');
+    guard(typeof name === 'string' && name.trim() && name.trim().length <= 120, 'invalid-input', 'Use a schedule name of 1 to 120 characters.');
+    const timing = agentScheduleTiming(args);
+    const actor = {kind: 'agent', userId: sessionId, via: 'user-request'};
+    const series = await this.seriesCreate(ws, {name: name.trim(), timing, sourceTicketId: ticketId, actor}, {sessionId, expectedRevision});
+    return {seriesId: series.id, scheduleId: series.scheduleId, sourceTicketId: series.sourceTicketId, revision: series.revision, status: series.status, timing: series.timing, scheduledAt: series.host?.scheduledAt ?? null};
+  }
+  async seriesCreate(ws, input, agentRequest) {
     const {name,timing,sourceTicketId,templateId,templateRevision,overrides,assignments,actor} = jsonClone(input);
+    const checkAgentSource = (core, source) => {
+      if (!agentRequest) return;
+      const {sessionId, expectedRevision} = agentRequest;
+      guard(!core.sessionOwner(sessionId) && source.originSessionId === sessionId, 'session-scope', 'Only the planning conversation that owns this Ticket can schedule it.');
+      const receipt = source.activity.find(event => event.type === 'series-created' && event.detail.sourceRevision === expectedRevision && event.actor.userId === sessionId);
+      if (receipt) {
+        const series = core.readSeries(ws, receipt.detail.seriesId);
+        if (series.name === name && same(series.timing, timing)) return series;
+      }
+      guard(source.revision === expectedRevision, 'stale-revision', 'Source Ticket revision changed. Read the Ticket again.');
+      guard(['draft', 'stopped'].includes(source.status), 'state-conflict', 'Schedule a draft or stopped Ticket.');
+    };
     return this.#enqueue(async () => {
       await this.#refresh();
       guard(Object.hasOwn(this.#store.paths.workspacePaths,ws),'unknown-workspace','Workspace has no physical mapping.');
@@ -287,15 +327,21 @@ export class FleetService {
       guard(Boolean(sourceTicketId) !== Boolean(templateId),'invalid-input','Choose a source Ticket or an orchestration template.');
       const instantiate = {id:randomUUID(),templateId,templateRevision,overrides,assignments,sessionId:null,actor};
       const source = sourceTicketId ? this.#core.readTicket(ws,sourceTicketId) : FleetCore.fromState(this.#core.exportState()).instantiateTemplate(ws,instantiate);
+      const prior = checkAgentSource(this.#core, source);
+      if (prior) return prior;
       guard(!source.abandonedAt,'state-conflict','Restore the abandoned Ticket before creating a schedule.');
       assertStart(source.plan); await this.#checkStartSelections(ws,source.plan);
       const entry = await this.#schedule('scheduleCreate',{title:name.trim().slice(0,120),prompt:`这是 Fleet 系列计划「${name}」的到点通知。Fleet 运行时会自动创建并启动当期 Ticket；你只需向用户简要确认本期已排入执行，不要自行执行任务内容。`,timing,target:{kind:'new_once',create:{cwd:this.#store.paths.workspacePaths[ws]}}});
       try {
-        return await this.#commit(ws,c => {
+        const series = await this.#commit(ws,c => {
           const current = sourceTicketId ? c.readTicket(ws,source.id) : c.instantiateTemplate(ws,instantiate);
-          guard(current.revision === source.revision && same(current.plan,source.plan) && same(current.activity.map(a => a.detail),source.activity.map(a => a.detail)),'stale-revision','Series source changed while enabling its schedule.');
-          return c.createSeries(ws,{name,timing,plan:source.plan,sourceTicketId:source.id,sourceTemplateId:templateId,scheduleId:entry.id,targetSessionId:entry.target?.sessionId,host:this.#hostEcho(entry)});
+          const concurrent = checkAgentSource(c, current);
+          if (concurrent) return concurrent;
+          guard(!current.abandonedAt && current.revision === source.revision && same(current.plan,source.plan) && same(current.activity.map(a => a.detail),source.activity.map(a => a.detail)),'stale-revision','Series source changed while enabling its schedule.');
+          return c.createSeries(ws,{name,timing,plan:source.plan,sourceTicketId:source.id,sourceTemplateId:templateId,scheduleId:entry.id,targetSessionId:entry.target?.sessionId,host:this.#hostEcho(entry),requestActor:agentRequest && actor});
         });
+        if (series.scheduleId !== entry.id) await this.#schedule('scheduleEdit', {id: entry.id, action: 'delete'});
+        return series;
       } catch (error) { if (entry?.id) await this.#schedule('scheduleEdit',{id:entry.id,action:'delete'}).catch(() => {}); throw error; }
     });
   }

@@ -26,6 +26,125 @@ async function fixture(t,p=plan()) {
  const draft=await s.saveDraftTicket('w',{id:'source',sessionId:'origin',plan:p});
  return {s,open,state,calls,adapter,draft,workspace,enable:()=>s.seriesCreate('w',{sourceTicketId:'source',name:'Daily',timing}),read:async()=>(await s.readSeries('w'))[0],deliver:at=>state.entry.lastDelivery={scheduledAt:at,deliveredAt:at,targetSessionId:'target'}};
 }
+const chatSchedule = (ticket, fields = {}) => ({
+ ticketId:ticket.id, expectedRevision:ticket.revision, name:'Chat schedule', kind:'daily', time:'09:30', timeZone:'Asia/Shanghai', ...fields,
+});
+const chatRules = [
+ [{kind:'at',date:'2035-01-08'}, {kind:'at',at:{date:'2035-01-08',time:'09:30:00',time_zone:'Asia/Shanghai'}}],
+ [{kind:'daily'}, {kind:'daily',daily:{time:'09:30:00',time_zone:'Asia/Shanghai'}}],
+ [{kind:'weekly',weekdays:[5,1,5]}, {kind:'weekly',weekly:{time:'09:30:00',time_zone:'Asia/Shanghai',weekdays:[1,5]}}],
+];
+for (const [rule, expectedTiming] of chatRules) test(`Chat ${rule.kind} scheduling persists the receipt and audit before any execution`, async t => {
+ const f = await fixture(t);
+ const args = chatSchedule(f.draft, rule);
+ const receipt = await f.s.agentSchedule('w', 'origin', args);
+ assert.deepEqual(receipt, {seriesId:receipt.seriesId,scheduleId:'schedule',sourceTicketId:f.draft.id,revision:1,status:'active',timing:expectedTiming,scheduledAt:first});
+ assert.ok(receipt.seriesId);
+ assert.equal(f.calls.create.length, 1);
+ assert.deepEqual(f.calls.create[0].timing, expectedTiming);
+ assert.deepEqual(f.calls.create[0].target, {kind:'new_once',create:{cwd:f.workspace}});
+ const source = await f.s.read('w', f.draft.id);
+ assert.equal(source.revision, f.draft.revision + 1);
+ assert.equal(source.status, 'draft');
+ assert.equal(source.execution, null);
+ assert.deepEqual(source.plan, f.draft.plan);
+ const event = source.activity.find(a => a.type === 'series-created');
+ assert.deepEqual(event.actor, {kind:'agent',userId:'origin',via:'user-request'});
+ assert.deepEqual(event.detail, {seriesId:receipt.seriesId,scheduleId:receipt.scheduleId,sourceRevision:f.draft.revision});
+ const stored = await f.read();
+ assert.deepEqual(stored.plan, f.draft.plan);
+ assert.deepEqual(stored.occurrences, []);
+ assert.equal(f.state.sessions, 0);
+ await f.s.close();
+ const reopened = await f.open();
+ assert.deepEqual(await reopened.agentSchedule('w', 'origin', args), receipt, 'replay with the original revision returns the persisted receipt');
+ assert.equal(f.calls.create.length, 1);
+ assert.deepEqual(await reopened.read('w', f.draft.id), source, 'replay must not append another activity event');
+ assert.equal((await reopened.readSeries('w')).length, 1);
+ f.deliver(first);
+ await reopened.tick();
+ const [series] = await reopened.readSeries('w');
+ const [occurrence] = series.occurrences;
+ const started = await reopened.read('w', occurrence.ticketId);
+ assert.notEqual(started.id, f.draft.id);
+ assert.deepEqual(started.plan, f.draft.plan);
+ assert.deepEqual(started.activity.find(a => a.type === 'ticket-started').actor, {kind:'system',via:'schedule',scheduleId:'schedule',occurrenceAt:first});
+ assert.equal((await reopened.read('w', f.draft.id)).status, 'draft');
+});
+
+test('Chat scheduling rejects foreign, stale, abandoned and invalid requests before creating a host task', async t => {
+ const f = await fixture(t);
+ const args = chatSchedule(f.draft);
+ await assert.rejects(f.s.agentSchedule('w', 'other', args), /conversation|session/i);
+ await assert.rejects(f.s.agentSchedule('w', 'origin', {...args, expectedRevision:args.expectedRevision + 1}), {code:'stale-revision'});
+ for (const invalid of [
+   {kind:'every'}, {time:'27:30'}, {timeZone:'Invalid/Zone'}, {timeZone:'+08:00'}, {kind:'at'}, {kind:'at',date:'2035-02-30'},
+   {kind:'weekly'}, {kind:'weekly',weekdays:[]}, {kind:'weekly',weekdays:[0,8]}, {date:'2035-01-08'}, {weekdays:[1]},
+ ]) {
+   await assert.rejects(f.s.agentSchedule('w', 'origin', {...args, ...invalid}), {code:'invalid-input'});
+ }
+ const abandoned = await f.s.human('w','user','abandonTicket',[f.draft.id,f.draft.revision]);
+ await assert.rejects(f.s.agentSchedule('w', 'origin', chatSchedule(abandoned)), /abandoned/i);
+ assert.equal(f.calls.create.length, 0);
+ assert.deepEqual(await f.s.readSeries('w'), []);
+});
+
+test('Chat scheduling validates runnable plans and live models before creating a host task', async t => {
+ const selection = {provider:'p',model:'m'};
+ const configured = plan();
+ configured.agents.worker.profile.modelSelection = selection;
+ const f = await fixture(t, configured);
+ const incomplete = await f.s.saveDraftTicket('w',{sessionId:'origin',plan:normalizePlan({goal:'Still drafting'})});
+ await assert.rejects(f.s.agentSchedule('w', 'origin', chatSchedule(incomplete)));
+ f.state.catalog.groups[0].models = [];
+ await assert.rejects(f.s.agentSchedule('w', 'origin', chatSchedule(f.draft)), {code:'unsupported-profile'});
+ assert.equal(f.calls.create.length, 0);
+ assert.deepEqual(await f.s.readSeries('w'), []);
+});
+
+test('Chat scheduling removes the host task if the source revision changes before Fleet commits', async t => {
+ const f = await fixture(t);
+ const concurrent = await f.open();
+ const create = f.adapter.scheduleCreate;
+ f.adapter.scheduleCreate = async input => {
+   const entry = await create(input);
+   await concurrent.saveDraftTicket('w', {ticketId:f.draft.id,sessionId:'origin',expectedRevision:f.draft.revision,plan:{...f.draft.plan,goal:'Later user edit'}});
+   return entry;
+ };
+ await assert.rejects(f.s.agentSchedule('w', 'origin', chatSchedule(f.draft)), {code:'stale-revision'});
+ assert.deepEqual(f.calls.edit, [{id:'schedule',action:'delete'}]);
+ assert.deepEqual(await f.s.readSeries('w'), []);
+ const source = await f.s.read('w', f.draft.id);
+ assert.equal(source.plan.goal, 'Later user edit');
+ assert.equal(source.activity.some(a => a.type === 'series-created'), false);
+});
+
+test('Concurrent identical Chat requests keep one Fleet series and one host schedule', {timeout:5000}, async t => {
+ const f = await fixture(t);
+ const competing = await f.open();
+ let releaseCreates;
+ const bothCreated = new Promise(resolve => { releaseCreates = resolve; });
+ const hostIds = [];
+ f.adapter.scheduleCreate = async () => {
+   const id = `schedule-${hostIds.length + 1}`;
+   hostIds.push(id);
+   if (hostIds.length === 2) releaseCreates();
+   await bothCreated;
+   return {id,target:{sessionId:`${id}-target`},scheduledAt:first,status:'active'};
+ };
+ const args = chatSchedule(f.draft, {kind:'weekly',weekdays:[5,1,5]});
+ const [firstReceipt, secondReceipt] = await Promise.all([
+   f.s.agentSchedule('w', 'origin', args),
+   competing.agentSchedule('w', 'origin', {...args,name:` ${args.name} `,weekdays:[1,5]}),
+ ]);
+ assert.deepEqual(firstReceipt, secondReceipt);
+ assert.deepEqual(f.calls.edit, [{id:hostIds.find(id => id !== firstReceipt.scheduleId),action:'delete'}]);
+ const [series, source] = await Promise.all([f.s.readSeries('w'),f.s.read('w', f.draft.id)]);
+ assert.equal(series.length, 1);
+ assert.equal(series[0].scheduleId, firstReceipt.scheduleId);
+ assert.equal(source.activity.filter(a => a.type === 'series-created').length, 1);
+});
+
 test('template schedule atomically commits its source draft and preserves old template revisions', async t => {
  const f=await fixture(t), workspace='empty';
  await f.s.registerWorkspace(workspace,path.join(path.dirname(f.workspace),'empty'));

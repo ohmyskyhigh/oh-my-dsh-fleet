@@ -16,6 +16,7 @@ Fleet uses DeepSeek Harness (DSH) workspaces and native sessions. Enable the plu
 
 ## Schedule or recover work
 
+- In the chat that created a runnable Ticket, ask Fleet to schedule it. For example, “Schedule this Ticket every Monday at 09:00 Europe/London.” You can also specify a single date and time or a daily time. Fleet returns the series ID and next run. The agent uses `fleet_schedule` directly, so you can keep working in your current window.
 - The Schedules tab shows one-time and recurring runs. Create a schedule from a template or Ticket, and check upcoming occurrences in month, week, or day view. Each occurrence has its own Ticket.
 - Use `/fleet stop TICKET` to stop a run. After the Ticket is fully stopped, you can revise unfinished work and use `/fleet resume TICKET` to continue that Ticket.
 - Use `/fleet health` if the workspace runtime is unavailable. Check the DSH version, that the plugin is enabled, and that the current session belongs to a registered workspace. `/fleet catalog` shows shared templates and the models and settings available to a plan.
