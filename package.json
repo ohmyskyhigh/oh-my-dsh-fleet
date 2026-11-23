@@ -93,6 +93,40 @@
       ]
     }
   },
+  "dshWorkshop": {
+    "schema": "omdsh-workshop-package/v1",
+    "type": "plugin",
+    "integration": {
+      "protocol": "harness-cordis",
+      "artifact": "cordis.patch.yml"
+    },
+    "install": {
+      "mode": "guided",
+      "adapter": "harness-cordis",
+      "failurePolicy": "manual",
+      "touchesCurrentBeforeActivation": true
+    },
+    "lifecycle": {
+      "activation": "restart-profile",
+      "dispose": "unknown"
+    },
+    "permissions": ["filesystem:read", "filesystem:write", "sessions:read", "sessions:write", "scheduling:write"],
+    "compatibility": {
+      "dshVersions": ["0.2.2-rc.5"]
+    },
+    "capability": {
+      "id": "fleet_status",
+      "kind": "tool",
+      "invocation": "In a native DSH chat registered to a workspace, invoke fleet_status with an empty argument object.",
+      "expected": "The tool returns a JSON array of Tickets belonging to the current workspace, with an empty array for a workspace without Tickets."
+    },
+    "evidence": {
+      "install": null,
+      "failureIsolation": null,
+      "hotReload": null,
+      "remove": null
+    }
+  },
   "publishConfig": {
     "access": "public"
   }
