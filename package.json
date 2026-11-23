@@ -1,6 +1,6 @@
 {
   "name": "oh-my-dsh-fleet",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "type": "module",
   "description": "Run DSH like a company. Multi-agent workflows for DeepSeek Harness with Ticket-based SOPs, review gates, and rework.",
   "scripts": {

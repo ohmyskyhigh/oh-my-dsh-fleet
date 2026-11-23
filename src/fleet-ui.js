@@ -136,7 +136,10 @@ export function createFleetViews(React) {
   const icon = name => h('span',{'aria-hidden':true},({plus:'＋',back:'←',arrow:'↗',refresh:'↻',flow:'◇',agent:'◈',chat:'↗'})[name] || name);
   const language = options => (cn,en) => options.language === 'zh' ? cn : en;
   const hasIssues = ticket => !ticket.abandonedAt && (list(ticket.nodes).some(n=>['failed','interrupted'].includes(n.status)) || list(ticket.gates).some(g=>g.status==='returned'));
-  const waiting = ticket => list(ticket.gates).filter(g=>g.status==='pending' && list(g.from).every(id=>list(ticket.nodes).some(n=>n.id===id&&n.status==='completed')));
+  const waiting = ticket => {
+    if (ticket.status !== 'running' || ticket.abandonedAt) return [];
+    return list(ticket.gates).filter(g=>g.status==='pending' && list(g.from).every(id=>list(ticket.nodes).some(n=>n.id===id&&n.status==='completed')));
+  };
   const timestamp = (value,L) => value ? new Date(value).toLocaleString(L('zh-CN','en'), {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
   // P-44～P-47 derived display helpers. Projections only; nothing here writes back.
   const shortHash = value => typeof value === 'string' && value.length > 8 ? `${value.slice(0,8)}…` : (value || '—');
@@ -2082,7 +2085,7 @@ export function createFleetViews(React) {
     if (list(ticket.nodes).some(node => node.status === 'failed')) return {sec:'now', key:['执行失败','Failed'], tone:'danger', rank:0};
     if (list(ticket.nodes).some(node => node.status === 'interrupted')) return {sec:'now', key:['待核对','Needs check'], tone:'danger', rank:1};
     if (list(ticket.gates).some(gate => gate.status === 'returned' || gate.coverage === 'stale')) return {sec:'now', key:['审核待处理','Review needs attention'], tone:'danger', rank:2};
-    if (list(ticket.gates).some(gate => gate.status === 'pending' && gate.reviewer?.kind === 'human' && list(gate.from).every(id => list(ticket.nodes).some(node => node.id === id && node.status === 'completed')))) return {sec:'now', key:['待人工审核','Awaiting review'], tone:'waiting', rank:3};
+    if (waiting(ticket).some(gate => gate.reviewer?.kind === 'human')) return {sec:'now', key:['待人工审核','Awaiting review'], tone:'waiting', rank:3};
     if (ticket.status === 'running') return {sec:'running', key:['执行中','Running'], tone:'running', rank:3};
     if (ticket.status === 'draft' && !ticket.incompatible) return {sec:'draft', key:['草稿待启动','Draft not started'], tone:'neutral', rank:4};
     return null;

@@ -50,6 +50,19 @@ test('Ticket list filters include every canonical status in order', () => {
   assert.deepEqual(values, ['all', ...TICKET_STATUSES]);
 });
 
+test('Workspace review queue follows the Ticket lifecycle even with a completed source and pending gate', () => {
+  const execution = {
+    currentConfigRevision: 1, configurations: { 1: { plan: ticket('review-ticket').plan } },
+    nodes: { n2: { status: 'completed' } }, gates: { g1: { status: 'pending' } }
+  };
+  for (const extra of [{ status: 'stop-requested' }, { status: 'stopped' }, { status: 'stopped', abandonedAt: '2026-11-23T07:53:51Z' }]) {
+    const markup = html(views.renderDashboard(options([ticket('review-ticket', { execution, ...extra })])));
+    assert.match(markup, /data-fleet-attention-empty/);
+  }
+  const running = html(views.renderDashboard(options([ticket('review-ticket', { execution })])));
+  assert.doesNotMatch(running, /data-fleet-attention-empty/);
+});
+
 test('overview: compact strip, grouped list, no sessions panel, no priority', () => {
   const m = html(views.renderDashboard(options([ticket('t1'), ticket('t2', { status: 'delivered' }), ticket('t3', { status: 'draft' })])));
   assert.ok(m.includes('fl-metrics fl-strip'), 'metrics rendered as strip');

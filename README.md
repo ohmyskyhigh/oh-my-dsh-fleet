@@ -14,13 +14,13 @@ oh-my-dsh-fleet is a multi-agent workflow plugin for DeepSeek Harness (DSH). Run
 
 | Plugin | DeepSeek Harness | Check the host version |
 | --- | --- | --- |
-| `oh-my-dsh-fleet@0.10.0` | **`0.2.2-rc.5`** | Run `dsh --version` for the CLI. Desktop uses its bundled Harness. |
+| `oh-my-dsh-fleet@0.10.1` | **`0.2.2-rc.5`** | Run `dsh --version` for the CLI. Desktop uses its bundled Harness. |
 
 | Source | Desktop · Plugins → Add plugin | CLI · Replace `web` with your Profile |
 | --- | --- | --- |
-| **GitHub Release** | Download [`oh-my-dsh-fleet-0.10.0.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.10.0/oh-my-dsh-fleet-0.10.0.tgz) and enter its absolute path. | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.0.tgz" --ignore-scripts` |
+| **GitHub Release** | Download [`oh-my-dsh-fleet-0.10.1.tgz`](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/download/v0.10.1/oh-my-dsh-fleet-0.10.1.tgz) and enter its absolute path. | `dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.1.tgz" --ignore-scripts` |
 | **GitHub repository** | Paste `https://github.com/ohmyskyhigh/oh-my-dsh-fleet` to install the default branch. | `dsh plugin --profile web add github:ohmyskyhigh/oh-my-dsh-fleet --ignore-scripts` |
-| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.10.0)** | Enter `oh-my-dsh-fleet@0.10.0`. | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.0` |
+| **[npm](https://www.npmjs.com/package/oh-my-dsh-fleet/v/0.10.1)** | Enter `oh-my-dsh-fleet@0.10.1`. | `dsh plugin --profile web add --save-exact oh-my-dsh-fleet@0.10.1` |
 
 Enable the plugin after installing and restart the app or CLI Profile if prompted. Open **oh-my-dsh-fleet** from the sidebar, enable Fleet for the target Workspace, and send `/fleet help` in a chat within that Workspace.
 
@@ -30,7 +30,7 @@ The previous package was `@dsh-fleet/shell`. Wait for active work to stop before
 
 ```sh
 dsh plugin --profile web remove @dsh-fleet/shell
-dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.0.tgz" --ignore-scripts
+dsh plugin --profile web add "/path/to/oh-my-dsh-fleet-0.10.1.tgz" --ignore-scripts
 ```
 
 Use the same Workspace folders and Fleet data location. Existing Tickets, templates, schedules, and `/fleet` commands carry over. [Previous release](https://github.com/ohmyskyhigh/oh-my-dsh-fleet/releases/tag/v0.9.8)
