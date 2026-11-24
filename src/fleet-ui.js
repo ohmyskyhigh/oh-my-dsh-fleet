@@ -1176,13 +1176,13 @@ export function createFleetViews(React) {
       ...(col.type==='nodes'?col.items.map(node=>h(interactive?'button':'div',{
         type:interactive?'button':undefined,key:node.id,className:'fl-node','data-fleet-node':node.id,
         'aria-pressed':interactive?ui.nodeId===node.id:undefined,onClick:interactive?()=>setUI({nodeId:node.id,attemptId:null,gateId:null}):undefined},
-        row(h('strong',null,node.id),node.status==='pending'&&o.nodeDependencyReadiness?.[node.id]?.ready===false?badge(L('等待上游','Waiting for upstream'),'waiting'):status(node.status||'pending',L)),h('p',{className:'fl-muted'},node.role),
+        row(h('span',{className:'fl-row fl-node-title'},h('svg',{className:'fl-ntype-icon fl-ntype-exec',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M4 3 L17 10 4 17 Z',fill:'currentColor'})),h('strong',null,node.id)),node.status==='pending'&&o.nodeDependencyReadiness?.[node.id]?.ready===false?badge(L('等待上游','Waiting for upstream'),'waiting'):status(node.status||'pending',L)),h('p',{className:'fl-muted'},node.role),
         h('p',{className:'fl-node-text','data-fleet-node-summary':node.id},node.task?.summary||firstSentence(node.task?.prompt)||text(node.task||{})),
         modelLine(o,node,agents,L),
         planChips(node.task,L),
         list(node.dependsOn).length>0&&h('p',{className:'fl-small fl-muted'},L('依赖：','Depends on: ')+node.dependsOn.join(', '))))
       :col.items.map(gate=>h(interactive?'button':'div',{type:interactive?'button':undefined,'aria-pressed':interactive?ui.gateId===gate.id:undefined,onClick:interactive?()=>o.selectGate(gate):undefined,className:'fl-node fl-node-gate',key:`gate-${gate.id}`,'data-fleet-gate-node':gate.id},
-        row(h('strong',null,`◇ ${gate.id}`),status(gate.status||'pending',L)),
+        row(h('span',{className:'fl-row fl-node-title'},h('svg',{className:'fl-ntype-icon fl-ntype-gate',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M10 2 L16.9 6 L16.9 14 L10 18 L3.1 14 L3.1 6 Z',fill:'currentColor'})),h('strong',null,gate.id)),status(gate.status||'pending',L)),
         h('p',{className:'fl-muted'},gate.reviewer?.kind==='human'?L('人工审批','Human review'):L('审核智能体','Agent review')),
         h('p',{className:'fl-small fl-muted'},`${list(gate.from).join(', ')||'—'} → ${list(gate.to).join(', ')||'—'}`))))));
     return h(FlowRegion,{o},nodes.length?h('div',{className:'fl-flow-columns'},...columns):empty(L('暂无节点','No nodes')));
@@ -1974,8 +1974,8 @@ export function createFleetViews(React) {
     };
     const ibar=()=>h('div',{className:'fl-ibar'},button(L('取消','Cancel'),cancelEdit,{className:'fl-btn fl-btn-ghost',disabled:saving}),button(L('应用','Apply'),applyEdit,{className:'fl-btn fl-btn-primary',disabled:locked}));
     const setCrits=next=>{setEditCrits(next);change('criteria',next);};
-    const agentIcon=()=>h('svg',{className:'fl-gic',viewBox:'0 0 20 20','aria-hidden':true},h('circle',{cx:10,cy:10,r:8,fill:'none',stroke:'currentColor',strokeWidth:1.5}),h('circle',{cx:10,cy:10,r:3,fill:'currentColor'}));
-    const gateIcon=()=>h('svg',{className:'fl-gic',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M10 2 18 10 10 18 2 10Z',fill:'none',stroke:'currentColor',strokeWidth:1.5}));
+    const agentIcon=()=>h('svg',{className:'fl-gic fl-ntype-icon fl-ntype-exec',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M4 3 L17 10 4 17 Z',fill:'currentColor'}));
+    const gateIcon=()=>h('svg',{className:'fl-gic fl-ntype-icon fl-ntype-gate',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M10 2 L16.9 6 L16.9 14 L10 18 L3.1 14 L3.1 6 Z',fill:'currentColor'}));
     const nodeCard=node=>{const assigned=agentFor(node),agent=assigned?.name||node.agentId||L('未分配','Unassigned'),known=!!assigned;
       return h('button',{type:'button',className:'fl-gcard',key:node.id,'data-fleet-draft-node':node.id,onClick:event=>openDetail(`node:${node.id}`,event.currentTarget)},
         agentIcon(),

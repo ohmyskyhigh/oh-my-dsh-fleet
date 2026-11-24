@@ -126,7 +126,7 @@ test('workflow: gate-guarded successor sits in a later column than its source (l
   const gates = [{ id: 'read-check', from: ['audit'], to: ['notes'], reviewer: { kind: 'human' }, status: 'pending', reviews: [] }];
   const t = ticket('chain', { plan: plan([node('audit'), node('notes', ['audit'])], gates), nodes: [node('audit'), node('notes', ['audit'])], gates });
   const m = html(views.renderDashboard(options([t], { page: 'ticket', ticketId: 'chain' })));
-  assert.match(m, /data-fleet-flow-level="0"[\s\S]*data-fleet-node="audit"[\s\S]*◇ read-check[\s\S]*data-fleet-flow-level="1"[\s\S]*data-fleet-node="notes"/, 'audit → gate → notes across columns');
+  assert.match(m, /data-fleet-flow-level="0"[\s\S]*data-fleet-node="audit"[\s\S]*fl-ntype-gate[\s\S]*<strong>read-check<\/strong>[\s\S]*data-fleet-flow-level="1"[\s\S]*data-fleet-node="notes"/, 'audit → gate → notes across columns');
 });
 
 test('graphLevels fuzz: cycles / self-dep / dangling / dup / deep / wide terminate and cover nodes', () => {

@@ -290,7 +290,7 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
     if (!record(gate) || !identity(gate.id)) { add(p, 'Invalid Gate identity.'); continue; }
     const gateFields = ['id', 'from', 'to', 'reviewer', 'requireEvidence', 'rework'];
     if (gate.reviewer?.kind === 'agent') gateFields.push('reviewTask', 'modelSelection', 'plannedCapabilities');
-    if (Object.keys(gate).some(key => !gateFields.includes(key))) add(p, 'Unexpected field for this Gate reviewer.');
+    if (Object.keys(gate).some(key => !gateFields.includes(key))) add(p, 'Unexpected Gate field (reviewTask, modelSelection and plannedCapabilities are only allowed when reviewer.kind is "agent").');
     if (gate.reviewTask !== undefined) validateReviewTask(gate.reviewTask, `${p}.reviewTask`, add);
     if (gate.modelSelection !== undefined) validateModelSelection(gate.modelSelection, `${p}.modelSelection`, add);
     if (gate.plannedCapabilities !== undefined) validateCapabilities(gate.plannedCapabilities, `${p}.plannedCapabilities`, add);

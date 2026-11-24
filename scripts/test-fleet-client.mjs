@@ -85,7 +85,7 @@ const dashboard=(ticket,ui={},catalog={})=>renderToStaticMarkup(realViews.render
 test('real Dashboard reads the Ticket plan even when a catalog template has the same ID',()=>{
   const ticket=canonical(),html=dashboard(ticket,{}, {binding:{orchestrationId:'canonical'},orchestrations:[{id:'canonical',definition:{nodes:[{id:'WRONG',role:'other',task:{prompt:'Wrong catalog plan'}}],gates:[]}}]});
   assert.match(html,/Ticket task A/);assert.match(html,/Separate artifact/);assert.match(html,/Retain requirements/);assert.match(html,/v0\.5\.0/);assert.doesNotMatch(html,/Wrong catalog plan/);
-  assert.match(html,/data-fleet-flow-level="0"[\s\S]*Ticket task A[\s\S]*◇ review[\s\S]*data-fleet-flow-level="1"[\s\S]*Ticket task B/);
+  assert.match(html,/data-fleet-flow-level="0"[\s\S]*Ticket task A[\s\S]*fl-ntype-gate[\s\S]*<strong>review<\/strong>[\s\S]*data-fleet-flow-level="1"[\s\S]*Ticket task B/);
 });
 test('real historical Node details use the selected attempt configuration and separate Node/Agent IDs',()=>{
   const ticket=canonical(),old=structuredClone(ticket.plan);ticket.status='running';ticket.plan.agents.writer.profile.instructions='Newest profile';

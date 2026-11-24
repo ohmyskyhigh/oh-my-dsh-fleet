@@ -172,6 +172,11 @@ export const fleetStyles = `
 .dsh-fleet-shell .fl-gcard .fl-gbody {display:grid;gap:2px;min-width:0;flex:1}
 .dsh-fleet-shell .fl-gcard .fl-gbody strong {font-size:13px;overflow-wrap:anywhere}
 .dsh-fleet-shell .fl-gic {flex:0 0 18px;width:18px;height:18px;color:var(--fl-muted);margin-top:2px}
+.dsh-fleet-shell .fl-ntype-icon {flex:0 0 14px;width:14px;height:14px;vertical-align:middle;margin-right:4px}
+.dsh-fleet-shell .fl-ntype-exec {color:var(--fl-muted)}
+.dsh-fleet-shell .fl-ntype-gate {color:var(--fl-accent)}
+.dsh-fleet-shell .fl-node-title {display:inline-flex;align-items:center;gap:0;min-width:0}
+.dsh-fleet-shell .fl-node.fl-node-gate .fl-ntype-icon {color:var(--fl-accent)}
 .dsh-fleet-shell .fl-ggroup {border:1px solid var(--fl-border);border-radius:10px;padding:14px 8px 8px;position:relative;display:grid;gap:8px;min-width:0}
 .dsh-fleet-shell .fl-ggroup .fl-gtab {position:absolute;top:-9px;left:10px;background:var(--fl-bg);border:1px solid var(--fl-border);border-radius:6px;padding:0 7px;font-size:11px;color:var(--fl-muted)}
 @container fleet (min-width:560px) {.dsh-fleet-shell .fl-ggroup {grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}.dsh-fleet-shell .fl-ggroup .fl-gtab {grid-column:1/-1;justify-self:start}}

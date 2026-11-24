@@ -295,7 +295,7 @@ function validatePlan(plan, { mode = 'save' } = {}) {
     if (!record(gate) || !identity(gate.id)) { add(p, 'Invalid Gate identity.'); continue; }
     const gateFields = ['id', 'from', 'to', 'reviewer', 'requireEvidence', 'rework'];
     if (gate.reviewer?.kind === 'agent') gateFields.push('reviewTask', 'modelSelection', 'plannedCapabilities');
-    if (Object.keys(gate).some(key => !gateFields.includes(key))) add(p, 'Unexpected field for this Gate reviewer.');
+    if (Object.keys(gate).some(key => !gateFields.includes(key))) add(p, 'Unexpected Gate field (reviewTask, modelSelection and plannedCapabilities are only allowed when reviewer.kind is "agent").');
     if (gate.reviewTask !== undefined) validateReviewTask(gate.reviewTask, `${p}.reviewTask`, add);
     if (gate.modelSelection !== undefined) validateModelSelection(gate.modelSelection, `${p}.modelSelection`, add);
     if (gate.plannedCapabilities !== undefined) validateCapabilities(gate.plannedCapabilities, `${p}.plannedCapabilities`, add);
@@ -839,6 +839,11 @@ const fleetStyles = `
 .dsh-fleet-shell .fl-gcard .fl-gbody {display:grid;gap:2px;min-width:0;flex:1}
 .dsh-fleet-shell .fl-gcard .fl-gbody strong {font-size:13px;overflow-wrap:anywhere}
 .dsh-fleet-shell .fl-gic {flex:0 0 18px;width:18px;height:18px;color:var(--fl-muted);margin-top:2px}
+.dsh-fleet-shell .fl-ntype-icon {flex:0 0 14px;width:14px;height:14px;vertical-align:middle;margin-right:4px}
+.dsh-fleet-shell .fl-ntype-exec {color:var(--fl-muted)}
+.dsh-fleet-shell .fl-ntype-gate {color:var(--fl-accent)}
+.dsh-fleet-shell .fl-node-title {display:inline-flex;align-items:center;gap:0;min-width:0}
+.dsh-fleet-shell .fl-node.fl-node-gate .fl-ntype-icon {color:var(--fl-accent)}
 .dsh-fleet-shell .fl-ggroup {border:1px solid var(--fl-border);border-radius:10px;padding:14px 8px 8px;position:relative;display:grid;gap:8px;min-width:0}
 .dsh-fleet-shell .fl-ggroup .fl-gtab {position:absolute;top:-9px;left:10px;background:var(--fl-bg);border:1px solid var(--fl-border);border-radius:6px;padding:0 7px;font-size:11px;color:var(--fl-muted)}
 @container fleet (min-width:560px) {.dsh-fleet-shell .fl-ggroup {grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}.dsh-fleet-shell .fl-ggroup .fl-gtab {grid-column:1/-1;justify-self:start}}
@@ -2404,13 +2409,13 @@ function createFleetViews(React) {
       ...(col.type==='nodes'?col.items.map(node=>h(interactive?'button':'div',{
         type:interactive?'button':undefined,key:node.id,className:'fl-node','data-fleet-node':node.id,
         'aria-pressed':interactive?ui.nodeId===node.id:undefined,onClick:interactive?()=>setUI({nodeId:node.id,attemptId:null,gateId:null}):undefined},
-        row(h('strong',null,node.id),node.status==='pending'&&o.nodeDependencyReadiness?.[node.id]?.ready===false?badge(L('等待上游','Waiting for upstream'),'waiting'):status(node.status||'pending',L)),h('p',{className:'fl-muted'},node.role),
+        row(h('span',{className:'fl-row fl-node-title'},h('svg',{className:'fl-ntype-icon fl-ntype-exec',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M4 3 L17 10 4 17 Z',fill:'currentColor'})),h('strong',null,node.id)),node.status==='pending'&&o.nodeDependencyReadiness?.[node.id]?.ready===false?badge(L('等待上游','Waiting for upstream'),'waiting'):status(node.status||'pending',L)),h('p',{className:'fl-muted'},node.role),
         h('p',{className:'fl-node-text','data-fleet-node-summary':node.id},node.task?.summary||firstSentence(node.task?.prompt)||text(node.task||{})),
         modelLine(o,node,agents,L),
         planChips(node.task,L),
         list(node.dependsOn).length>0&&h('p',{className:'fl-small fl-muted'},L('依赖：','Depends on: ')+node.dependsOn.join(', '))))
       :col.items.map(gate=>h(interactive?'button':'div',{type:interactive?'button':undefined,'aria-pressed':interactive?ui.gateId===gate.id:undefined,onClick:interactive?()=>o.selectGate(gate):undefined,className:'fl-node fl-node-gate',key:`gate-${gate.id}`,'data-fleet-gate-node':gate.id},
-        row(h('strong',null,`◇ ${gate.id}`),status(gate.status||'pending',L)),
+        row(h('span',{className:'fl-row fl-node-title'},h('svg',{className:'fl-ntype-icon fl-ntype-gate',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M10 2 L16.9 6 L16.9 14 L10 18 L3.1 14 L3.1 6 Z',fill:'currentColor'})),h('strong',null,gate.id)),status(gate.status||'pending',L)),
         h('p',{className:'fl-muted'},gate.reviewer?.kind==='human'?L('人工审批','Human review'):L('审核智能体','Agent review')),
         h('p',{className:'fl-small fl-muted'},`${list(gate.from).join(', ')||'—'} → ${list(gate.to).join(', ')||'—'}`))))));
     return h(FlowRegion,{o},nodes.length?h('div',{className:'fl-flow-columns'},...columns):empty(L('暂无节点','No nodes')));
@@ -3202,8 +3207,8 @@ function createFleetViews(React) {
     };
     const ibar=()=>h('div',{className:'fl-ibar'},button(L('取消','Cancel'),cancelEdit,{className:'fl-btn fl-btn-ghost',disabled:saving}),button(L('应用','Apply'),applyEdit,{className:'fl-btn fl-btn-primary',disabled:locked}));
     const setCrits=next=>{setEditCrits(next);change('criteria',next);};
-    const agentIcon=()=>h('svg',{className:'fl-gic',viewBox:'0 0 20 20','aria-hidden':true},h('circle',{cx:10,cy:10,r:8,fill:'none',stroke:'currentColor',strokeWidth:1.5}),h('circle',{cx:10,cy:10,r:3,fill:'currentColor'}));
-    const gateIcon=()=>h('svg',{className:'fl-gic',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M10 2 18 10 10 18 2 10Z',fill:'none',stroke:'currentColor',strokeWidth:1.5}));
+    const agentIcon=()=>h('svg',{className:'fl-gic fl-ntype-icon fl-ntype-exec',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M4 3 L17 10 4 17 Z',fill:'currentColor'}));
+    const gateIcon=()=>h('svg',{className:'fl-gic fl-ntype-icon fl-ntype-gate',viewBox:'0 0 20 20','aria-hidden':true},h('path',{d:'M10 2 L16.9 6 L16.9 14 L10 18 L3.1 14 L3.1 6 Z',fill:'currentColor'}));
     const nodeCard=node=>{const assigned=agentFor(node),agent=assigned?.name||node.agentId||L('未分配','Unassigned'),known=!!assigned;
       return h('button',{type:'button',className:'fl-gcard',key:node.id,'data-fleet-draft-node':node.id,onClick:event=>openDetail(`node:${node.id}`,event.currentTarget)},
         agentIcon(),
