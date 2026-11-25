@@ -39,7 +39,7 @@ async function reactRuntime() {
     ['react-dom/client', path.join(domDir, 'cjs/react-dom-client.production.js')]
   ];
   const factories = await Promise.all(sources.map(async ([id, file]) => `${JSON.stringify(id)}: function(module,exports,require){\n${await fs.readFile(file, 'utf8')}\n}`));
-  return `// Unmodified installed production CJS modules, wrapped only for browser require.\n(()=>{const factories={${factories.join(',\n')}};const cache={};window.__realRequire=id=>{if(cache[id])return cache[id].exports;if(!factories[id])throw Error('Unknown fixture CJS module '+id);const module={exports:{}};cache[id]=module;factories[id](module,module.exports,window.__realRequire);return module.exports;};window.__ModuleLoader__={load:entry=>{if(entry.id!=='oh-my-dsh-fleet')throw Error('Unexpected Client module');window.__fleetProductionPlugin=entry.factory(window.__realRequire);}};})();`;
+  return `// Unmodified installed production CJS modules, wrapped only for browser require.\n(()=>{const factories={${factories.join(',\n')}};const cache={};window.__realRequire=id=>{if(cache[id])return cache[id].exports;if(!factories[id])throw Error('Unknown fixture CJS module '+id);const module={exports:{}};cache[id]=module;factories[id](module,module.exports,window.__realRequire);return module.exports;};window.__ModuleLoader__={load:entry=>{if(entry.id!=='@dsh-fleet/shell')throw Error('Unexpected Client module');window.__fleetProductionPlugin=entry.factory(window.__realRequire);}};})();`;
 }
 
 function adapterFixture() {
@@ -100,7 +100,7 @@ export async function createFleetUIFixture({scheduleAdapter={}}={}) {
     ['waiting', '核对发布清单与测试证据'], ['failed', '处理上游接口连接失败'],
     ['draft', '准备下一轮文档和源码审查'], ['delivered', '交付工作区数据报告'], ['returned', '补充缺失的验收依据'],
     ['stale', '复核过期审核结论'], ['evidence', '凭证据完成人工审核']
-  ]) await saveSeed('alpha',id,goal,id==='evidence'?{gates:clone(evidenceGates)}:{});
+  ]) await saveSeed('alpha',id,goal,id==='evidence'?{gates:clone(evidenceGates)}:id==='returned'?{gates:clone(definition.gates).map(g=>({...g,rework:{maxRounds:0}}))}:{});
   // 0.7.0 clarity seed: dual-layer deliverables, node summaries and model selections (kept draft until the browser check starts it).
   const clarityAgents = clone(agents);
   clarityAgents.writer.profile.modelSelection = { provider: 'fixture', model: 'fixture-default', reasoningEffort: 'low' };

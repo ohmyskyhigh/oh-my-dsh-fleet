@@ -213,7 +213,10 @@ test('applyGatePolicy/applyTaskContract/applyDeliveryTarget produce save-valid p
   assert.equal(validatePlan(gated,{mode:'save'}).valid,true);
   const cleared=applyGatePolicy(gated,'q',{requireEvidence:false,rework:null});
   assert.equal(cleared.gates[0].requireEvidence,undefined);assert.equal(cleared.gates[0].rework,undefined);
-  assert.throws(()=>applyGatePolicy(plan,'q',{rework:{maxRounds:0}}),/positive integer/);
+  assert.throws(()=>applyGatePolicy(plan,'q',{rework:{maxRounds:-1}}),/safe integer/);
+  assert.deepEqual(applyGatePolicy(plan,'q',{rework:{maxRounds:0}}).gates[0].rework,{maxRounds:0});
+  assert.deepEqual(applyGatePolicy(plan,'q',{rework:{maxRounds:2,reworkSession:'new'}}).gates[0].rework,{maxRounds:2,reworkSession:'new'});
+  assert.throws(()=>applyGatePolicy(plan,'q',{rework:{maxRounds:2,reworkSession:'sometimes'}}),/reuse/);
   assert.throws(()=>applyGatePolicy(plan,'q',{rework:{maxRounds:2,targetNodes:['ghost']}}),/reference plan nodes/);
   assert.throws(()=>applyGatePolicy(plan,'missing',{}),/Unknown gate/);
   const contracted=applyTaskContract(plan,'build',{acceptance:['a1','a2'],scope:{in:['report/'],out:['config']},verify:['check.py']});
@@ -522,4 +525,60 @@ test('side pane node selection stays inside the pane and a foreign-Session resou
   const foreign=h.render(PANE_KEY,'dsh-resource://fleet-ticket-draft/w1/other-session/pane-ticket');
   assert.ok(h.all(foreign).some(node=>node.props.role==='alert'),'a resource from another Session shows the ownership alert');
   assert.equal(h.all(foreign).some(node=>node.children.includes('pane-ticket')),false);
+});
+// P-72／P-73 reusable-template entry points and dialogs (static markup, real React).
+test('Ticket detail and node thread expose save-as-template entries for a current plan',()=>{
+  const ticket=canonical();
+  const html=dashboard(ticket,{nodeId:'A'});
+  assert.match(html,/data-fleet-save-orchestration="canonical"/);
+  assert.match(html,/data-fleet-save-agent="A"/);
+  const legacy=structuredClone(ticket);legacy.plan={ticket:{goal:'old shape'}};
+  assert.doesNotMatch(dashboard(legacy,{nodeId:'A'}),/data-fleet-save-orchestration=/);
+});
+test('Root Agent and orchestration lists expose a New template entry',()=>{
+  const ticket=canonical();
+  assert.match(dashboard(ticket,{page:'agents'}),/data-fleet-template-new="agent"/);
+  assert.match(dashboard(ticket,{page:'orchestrations'}),/data-fleet-template-new="orchestration"/);
+});
+test('save-as-orchestration dialog previews the value-copied content and per-Agent mapping',()=>{
+  const ticket=canonical();
+  const html=dashboard(ticket,{dialog:{kind:'template-from-ticket',ticketId:ticket.id}},{agents:[{id:'root-writer',name:'Root writer',revision:2}],orchestrations:[]});
+  assert.match(html,/data-fleet-save-orchestration-form="canonical"/);
+  assert.match(html,/data-fleet-agent-map="writer"/);
+  assert.match(html,/data-fleet-agent-map-mode="writer"/);
+  assert.match(html,/data-fleet-template-preview/);
+  assert.match(html,/data-fleet-template-mode-new/);
+});
+test('save-as-Agent dialog copies the profile and only offers the node model opt-in when present',()=>{
+  const ticket=canonical();
+  const plain=dashboard(ticket,{dialog:{kind:'template-from-node',ticketId:ticket.id,nodeId:'A'}});
+  assert.match(plain,/data-fleet-save-agent-form="A"/);
+  assert.match(plain,/Local profile/);
+  assert.doesNotMatch(plain,/data-fleet-save-agent-model/);
+  const withModel=structuredClone(ticket);withModel.plan.nodes[0].modelSelection={provider:'host',model:'fixture-model'};
+  assert.match(dashboard(withModel,{dialog:{kind:'template-from-node',ticketId:ticket.id,nodeId:'A'}}),/data-fleet-save-agent-model/);
+});
+test('instantiation form prefills template defaults and marks them editable',()=>{
+  const ticket=canonical();
+  const catalog={agents:[{id:'writer',name:'Writer',revision:1}],orchestrations:[{id:'flow',name:'Flow',revision:1,definition:{nodes:[{id:'A',agentId:'writer',task:{prompt:'A'}}],gates:[],defaults:{goal:'Prefilled goal',criteria:['prefilled criterion'],deliverables:['prefilled artifact']}}}]};
+  const html=dashboard(ticket,{dialog:{kind:'instantiate',flowId:'flow'}},catalog);
+  assert.match(html,/data-fleet-instantiate-defaults/);
+  assert.match(html,/Prefilled goal/);
+  assert.match(html,/prefilled criterion/);
+  assert.match(html,/prefilled artifact/);
+});
+test('template source display supports both copied-Template and source-Ticket provenance',()=>{
+  const ticket=canonical();
+  const catalog={agents:[{id:'writer',name:'Writer',revision:1,profile:{instructions:'x'},source:{ticketId:'canonical',ticketRevision:1,workspaceId:'w1',nodeId:'A'},history:[]}],orchestrations:[]};
+  const html=dashboard(ticket,{page:'agent',agentId:'writer'},catalog);
+  assert.match(html,/Source Ticket/);
+  assert.match(html,/canonical/);
+});
+// P-77 wiring regression: the real Client must carry overview.admin from /api/fleet/overview
+// into renderRootOverview; isolated UI tests feed admin directly and missed this seam.
+test('Root overview request forwards admin settings to the Admin tab wiring', async () => {
+  const source = await readFile(new URL('../src/fleet-client.js', import.meta.url), 'utf8');
+  assert.match(source, /admin:body\.admin\?\?null/, 'requestOverview must set overview.admin');
+  assert.match(source, /admin:null/, 'initial overview state must declare admin');
+  assert.match(source, /admin:overview\.admin/, 'ControlPanel must pass overview.admin to renderRootOverview');
 });

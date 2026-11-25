@@ -1,7 +1,7 @@
 /** Synchronous canonical Ticket domain. Trusted capabilities never escape to Agent tools. */
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { PLAN_CONTRACT_VERSION, TICKET_STATUSES, normalizePlan, validatePlan, isCurrentPlan, repairLegacyPlan, projectTemplate, deliverableView, readableTitle, isUtcInstant as utc } from './fleet-model.js';
+import { PLAN_CONTRACT_VERSION, TICKET_STATUSES, normalizePlan, validatePlan, isCurrentPlan, repairLegacyPlan, projectTemplate, deliverableView, readableTitle, orchestrationContentFromPlan, isUtcInstant as utc } from './fleet-model.js';
 
 export class FleetCoreError extends Error {
   constructor(code, message) { super(message); this.name = 'FleetCoreError'; this.code = code; }
@@ -14,6 +14,14 @@ const copy = value => structuredClone(value);
 const now = () => new Date().toISOString();
 const inflight = d => ['created', 'submit-intent', 'submitted', 'uncertain'].includes(d?.phase);
 const finishedNode = status => status === 'completed' || status === 'skipped';
+// P-74: effective rework policy. Agent gates rework by default, capped at maxRounds (default 3;
+// explicit 0 disables). Human gates rework on every return unless explicitly disabled with 0.
+function reworkPolicy(definition) {
+  const isAgent = definition.reviewer?.kind === 'agent';
+  const declared = definition.rework?.maxRounds;
+  const maxRounds = declared ?? (isAgent ? 3 : 0);
+  return { isAgent, maxRounds, enabled: isAgent ? maxRounds > 0 : declared !== 0 };
+}
 const finishedGate = status => status === 'passed' || status === 'skipped';
 const skippedItem = (execution, item) => Boolean(item?.whenNodeRuns && execution.nodes[item.whenNodeRuns]?.status === 'skipped');
 const ownValue = (map, key) => map && Object.hasOwn(map, key) ? map[key] : undefined;
@@ -46,7 +54,7 @@ export function nativeProgressRow(item, actor) {
   if (tool !== undefined) row.tool = tool;
   return row;
 }
-export const defaultSettings = () => ({ revision: 1, rules: [], generation: { rules: [] }, execution: { rules: [] } });
+export const defaultSettings = () => ({ revision: 1, rules: [], generation: { rules: [] }, execution: { rules: [] }, admin: { workspaces: [] } });
 // P-65 scheduled series: the host owns calendar rules; Fleet freezes the plan and records occurrences.
 const SERIES_STATUSES = ['active', 'paused', 'orphaned', 'ended'];
 const TIMING_KINDS = ['after', 'at', 'every', 'daily', 'weekly', 'cron', 'rrule'];
@@ -150,11 +158,22 @@ function mergeSeriesChange(base, before, after, key) {
 }
 export function normalizeSettings(input) {
   const settings = copy(object(input, 'settings'));
-  requireThat(Object.keys(settings).every(k => ['revision', 'rules', 'generation', 'execution'].includes(k)), 'invalid-input', 'Unexpected global settings field.');
-  settings.revision ??= 1; settings.rules ??= []; settings.generation ??= { rules: [] }; settings.execution ??= { rules: [] };
+  requireThat(Object.keys(settings).every(k => ['revision', 'rules', 'generation', 'execution', 'admin'].includes(k)), 'invalid-input', 'Unexpected global settings field.');
+  settings.revision ??= 1; settings.rules ??= []; settings.generation ??= { rules: [] }; settings.execution ??= { rules: [] }; settings.admin ??= { workspaces: [] };
   requireThat(Number.isSafeInteger(settings.revision) && settings.revision > 0, 'invalid-input', 'Invalid settings revision.');
   for (const rules of [settings.rules, settings.generation.rules, settings.execution.rules]) requireThat(Array.isArray(rules) && rules.every(r => typeof r === 'string'), 'invalid-input', 'Global rules must be text arrays.');
   for (const part of [settings.generation, settings.execution]) requireThat(Object.keys(part).every(k => k === 'rules'), 'invalid-input', 'Unsupported rules setting.');
+  // P-77: per-Workspace Admin grants; scope "all" or an explicit unique Workspace list.
+  const admin = settings.admin;
+  requireThat(isRecord(admin) && Object.keys(admin).every(k => k === 'workspaces') && Array.isArray(admin.workspaces), 'invalid-input', 'Invalid Admin settings.');
+  const seen = new Set();
+  for (const entry of admin.workspaces) {
+    requireThat(isRecord(entry) && Object.keys(entry).every(k => ['workspaceId', 'scope', 'grantedBy', 'grantedAt'].includes(k)), 'invalid-input', 'Invalid Admin grant.');
+    text(entry.workspaceId, 'Admin workspaceId'); requireThat(!seen.has(entry.workspaceId), 'invalid-input', 'Duplicate Admin workspace.'); seen.add(entry.workspaceId);
+    requireThat(entry.scope === 'all' || (Array.isArray(entry.scope) && entry.scope.every(id => typeof id === 'string' && id.trim()) && new Set(entry.scope).size === entry.scope.length), 'invalid-input', 'Admin scope must be "all" or unique Workspace IDs.');
+    if (entry.grantedBy !== undefined) requireThat(typeof entry.grantedBy === 'string' && entry.grantedBy, 'invalid-input', 'Invalid Admin grantedBy.');
+    if (entry.grantedAt !== undefined) requireThat(utc(entry.grantedAt), 'invalid-input', 'Invalid Admin grantedAt.');
+  }
   return settings;
 }
 const planInput = (input, options) => { try { return normalizePlan(input, options); } catch (e) { throw Object.assign(new FleetCoreError(e.code ?? 'invalid-input', e.message), { diagnostics: e.diagnostics }); } };
@@ -236,7 +255,7 @@ export class FleetCore {
       state.settings = normalizeSettings(state.settings);
       const unique = (rows, label) => requireThat(new Set(rows.map(r => text(r.id, label))).size === rows.length, 'invalid-state', `Duplicate ${label}.`);
       unique(state.templates, 'Template'); unique(state.workspaces, 'Workspace');
-      const sessions = new Set(), attempts = new Set();
+      const sessions = new Map(), attempts = new Set();
       for (const template of state.templates) { requireThat(['agent', 'orchestration'].includes(template.kind) && Number.isSafeInteger(template.revision) && template.revision > 0, 'invalid-state', 'Invalid Template.'); object(template.content, 'Template content'); requireThat(Array.isArray(template.history), 'invalid-state', 'Invalid Template history.'); }
       for (const w of state.workspaces) {
         requireThat(Array.isArray(w.tickets) && !('binding' in w || 'definitions' in w), 'invalid-state', 'Workspace stores Tickets only.'); unique(w.tickets, 'Ticket');
@@ -283,20 +302,25 @@ export class FleetCore {
                 requireThat(gate && decision.gateId === id && decision.from === gate.from && e.nodes[gate.from]?.attempts.at(-1)?.id === decision.attemptId && e.nodes[gate.from]?.status === 'completed' && Array.isArray(decision.routes) && decision.routes.length === gate.routes.length && decision.routes.every((r, i) => r.id === gate.routes[i].id && typeof r.matched === 'boolean'), 'invalid-state', 'Invalid persisted Logic Gate decision.');
               }
             }
-            for (const n of Object.values(e.nodes)) {
+            for (const [nodeId, n] of Object.entries(e.nodes)) {
               requireThat(['pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'skipped'].includes(n.status) && Array.isArray(n.attempts) && Array.isArray(n.thread), 'invalid-state', 'Invalid Node execution.');
               for (const a of n.attempts) {
                 requireThat(!attempts.has(a.id), 'invalid-state', 'Duplicate Attempt.'); attempts.add(a.id);
                 requireThat(a.configRevision === null && t.legacy || Object.hasOwn(e.configurations, a.configRevision), 'invalid-state', 'Unknown Attempt configuration.');
-                if (a.sessionId) { requireThat(!sessions.has(a.sessionId), 'invalid-state', 'Duplicate Session ownership.'); sessions.add(a.sessionId); }
+                if (a.sessionId) {
+                  // P-75: sequential reuse of the same Node's Session is legal once the prior Attempt is terminal.
+                  const prev = sessions.get(a.sessionId);
+                  requireThat(!prev || (prev.kind === 'node' && prev.ticketId === t.id && prev.nodeId === nodeId && prev.status !== 'running'), 'invalid-state', 'Duplicate Session ownership.');
+                  sessions.set(a.sessionId, { kind: 'node', ticketId: t.id, nodeId, status: a.status });
+                }
                 if (a.dispatch?.sessionId) requireThat(a.sessionId === a.dispatch.sessionId, 'invalid-state', 'Attempt and dispatch Session mismatch.');
                 if (a.completion !== undefined) { object(a.completion, 'completion'); requireThat(Array.isArray(a.completion.artifactRefs) && a.completion.evidenceKind === 'agent-report', 'invalid-state', 'Invalid Attempt completion.'); }
               }
               if (n.status === 'running') requireThat(n.attempts.at(-1)?.status === 'running', 'invalid-state', 'Running Node lacks active Attempt.');
             }
-            const gateSessions = g => { if (g.dispatch?.sessionId) { requireThat(!sessions.has(g.dispatch.sessionId), 'invalid-state', 'Duplicate Session ownership.'); sessions.add(g.dispatch.sessionId); } };
-            const gateShape = g => { requireThat(['pending', 'passed', 'returned', 'skipped'].includes(g.status) && Array.isArray(g.reviews), 'invalid-state', 'Invalid Gate.'); if (g.autoReworkRounds !== undefined) requireThat(Number.isSafeInteger(g.autoReworkRounds) && g.autoReworkRounds >= 0, 'invalid-state', 'Invalid Gate rework budget.'); for (const r of g.reviews) if (r.artifactRefs !== undefined) requireThat(Array.isArray(r.artifactRefs), 'invalid-state', 'Invalid review artifactRefs.'); gateSessions(g); };
-            for (const g of Object.values(e.gates)) { gateShape(g); for (const h of g.history ?? []) gateSessions(h); }
+            const gateSessions = (g, gateId) => { if (g.dispatch?.sessionId) { const prev = sessions.get(g.dispatch.sessionId); requireThat(!prev || (prev.kind === 'gate' && prev.ticketId === t.id && prev.gateId === gateId), 'invalid-state', 'Duplicate Session ownership.'); sessions.set(g.dispatch.sessionId, { kind: 'gate', ticketId: t.id, gateId }); } };
+            const gateShape = (g, gateId) => { requireThat(['pending', 'passed', 'returned', 'skipped'].includes(g.status) && Array.isArray(g.reviews), 'invalid-state', 'Invalid Gate.'); if (g.autoReworkRounds !== undefined) requireThat(Number.isSafeInteger(g.autoReworkRounds) && g.autoReworkRounds >= 0, 'invalid-state', 'Invalid Gate rework budget.'); for (const r of g.reviews) if (r.artifactRefs !== undefined) requireThat(Array.isArray(r.artifactRefs), 'invalid-state', 'Invalid review artifactRefs.'); gateSessions(g, gateId); };
+            for (const [gateId, g] of Object.entries(e.gates)) { gateShape(g, gateId); for (const h of g.history ?? []) gateSessions(h, gateId); }
             if (t.status === 'stopped') requireThat(!Object.values(e.nodes).some(n => ['running', 'pending'].includes(n.status)) && !Object.values(e.gates).some(g => inflight(g.dispatch)), 'invalid-state', 'Stopped Ticket has active work.');
             if (t.status === 'delivered') {
               requireThat(Object.values(e.nodes).every(n => finishedNode(n.status)) && Object.values(e.gates).every(g => finishedGate(g.status)), 'invalid-state', 'Delivered Ticket is incomplete.');
@@ -430,7 +454,7 @@ export class FleetCore {
     requireThat(version?.content, 'invalid-input', 'Unknown orchestration template revision.');
     object(assignments, 'assignments'); object(overrides, 'overrides');
     requireThat(Object.keys(overrides).every(k => ['goal','title','inputs','deliverables','criteria','requirements'].includes(k)), 'invalid-input', 'Unexpected template override.');
-    const { nodes, gates } = copy(version.content);
+    const { nodes, gates, logicGates } = copy(version.content);
     const agents = new Map(), missing = [];
     const sourceRefs = [{ kind: 'orchestration', templateId, templateRevision: version.revision, nodeIds: nodes.map(n => n.id) }];
     for (const node of nodes) {
@@ -443,7 +467,16 @@ export class FleetCore {
       sourceRefs.push({ kind: 'agent', templateId: agentId, templateRevision: template.revision, localId: agentId });
     }
     if (missing.length) throw Object.assign(new FleetCoreError('incomplete-plan', `Assign an Agent to Nodes: ${missing.join(', ')}.`), {diagnostics:missing.map(nodeId => ({nodeId,path:`nodes.${nodeId}.agentId`,code:'incomplete-plan',message:'Assign a Root Agent template.'}))});
-    return this.saveDraftTicket(ws, { id, sessionId, plan: { contractVersion: PLAN_CONTRACT_VERSION, ...overrides, agents: Object.fromEntries(agents), nodes, gates }, sourceRefs, actor });
+    // P-72: logicGates travel with the orchestration content; defaults only prefill the instantiation
+    // form (overrides), they never enter the plan implicitly.
+    return this.saveDraftTicket(ws, { id, sessionId, plan: { contractVersion: PLAN_CONTRACT_VERSION, ...overrides, agents: Object.fromEntries(agents), nodes, gates, ...(logicGates !== undefined ? { logicGates } : {}) }, sourceRefs, actor });
+  }
+  /** P-72／P-73 audit trail: append one templates-saved activity without touching the Ticket's
+   * plan, revision, sourceRefs or updatedAt. Runs in its own Workspace commit after the Root commit. */
+  recordTemplatesSaved(ws, ticketId, detail, actor) {
+    const t = this.#ticket(ws, ticketId);
+    t.activity.push({ id: randomUUID(), time: now(), type: 'templates-saved', actor: copy(actor), ticketRevision: t.revision, detail: copy(detail) });
+    return copy(t);
   }
   #series(ws, id) { const s = this.#workspace(ws).series?.find(s => s.id === id); requireThat(s, 'unknown-series', 'Unknown Fleet series in this Workspace.'); return s; }
   listSeries(ws) { return copy(this.#state.workspaces.find(w => w.id === ws)?.series ?? []); }
@@ -540,6 +573,7 @@ export class FleetCore {
   }
   listWorkspaces() { return this.#state.workspaces.map(w => w.id); }
   listTickets(ws) { return copy(this.#state.workspaces.find(w => w.id === ws)?.tickets ?? []); }
+  listTemplates() { return this.#state.templates.map(projectTemplate); }
   listDraftTickets(ws, sessionId) { return this.listTickets(ws).filter(t => t.status === 'draft' && (sessionId === undefined || t.originSessionId === sessionId)); }
   readTicket(ws, id) { return copy(this.#ticket(ws, id)); }
   #sources(plan, refs) {
@@ -752,7 +786,12 @@ export class FleetCore {
     return Object.freeze({ attemptId: attempt.id,
       input: () => { active(); return copy({ task: definition.task, configRevision: attempt.configRevision, profile: { id: agentId, ...frozen.plan.agents[agentId] }, modelSelection: definition.modelSelection ?? null, inputs: frozen.plan.inputs, rules: frozen.rules, ...(attempt.upstreamTickets ? {upstreamTickets:attempt.upstreamTickets} : {}) }); },
       attachSession: sessionId => { active(); text(sessionId, 'Session ID'); requireThat(!attempt.sessionId || attempt.sessionId === sessionId, 'state-conflict', 'Attempt already has another Session.');
-        const owner = this.sessionOwner(sessionId); requireThat(!owner || owner.attemptId === attempt.id, 'session-conflict', 'Session already belongs to another execution context.');
+        const owner = this.sessionOwner(sessionId);
+        if (owner && owner.attemptId !== attempt.id) {
+          // P-75: sequential reuse of this Node's own previous Session is allowed once that Attempt is terminal.
+          const prior = owner.ticketId === t.id && owner.nodeId === nodeId ? n.attempts.find(a => a.id === owner.attemptId) : null;
+          requireThat(prior && prior.status !== 'running', 'session-conflict', 'Session already belongs to another execution context.');
+        }
         if (attempt.sessionId === sessionId) return sessionId; attempt.sessionId = sessionId; if (attempt.dispatch) attempt.dispatch.sessionId = sessionId; this.#touch(t); return sessionId; },
       recordDispatch: (data, expectedRequestId) => { active(); if (expectedRequestId !== undefined) requireThat(attempt.dispatch?.requestId === expectedRequestId, 'stale-dispatch', 'Dispatch changed.'); const d = this.#dispatch(data); if (attempt.sessionId) d.sessionId = attempt.sessionId; attempt.dispatch = d; this.#touch(t); return copy(d); },
       postMessage: message => { active(); text(message, 'message'); const row = { id: randomUUID(), time: now(), actor, attemptId: attempt.id, intent: 'execution', text: message }; n.thread.push(row); this.#touch(t); return copy(row); },
@@ -814,18 +853,105 @@ export class FleetCore {
       confirmStopped: () => { requireThat(t.status === 'stop-requested', 'state-conflict', 'No stop was requested.'); return finish('stopped'); }
     });
   }
+  /** P-76: stop execution on behalf of an explicit user decision, audited as the Agent acting via user-request. */
+  #stopTicket(t, actor) {
+    if (['stopped', 'stop-requested'].includes(t.status)) return copy(t);
+    requireThat(t.status === 'running' || t.status === 'delivered' && Object.values(t.execution.gates).some(g => inflight(g.dispatch)), 'not-running', 'No execution to stop.');
+    t.status = 'stop-requested';
+    for (const n of Object.values(t.execution.nodes)) if (n.status === 'pending') n.status = 'cancelled';
+    this.#touch(t); this.#event(t, 'stop-requested', actor); this.#settle(t); return copy(t);
+  }
   #dispatch(input) { const d = copy(object(input, 'dispatch')); requireThat(Object.keys(d).every(k => ['sessionId', 'requestId', 'messageId', 'phase', 'detail', 'error', 'owner', 'claimedAt'].includes(k)), 'invalid-input', 'Unexpected dispatch field.'); requireThat(['created', 'submit-intent', 'submitted', 'uncertain', 'finished', 'failed', 'stopped'].includes(d.phase), 'invalid-input', 'Invalid dispatch phase.'); d.requestId ??= d.messageId; text(d.requestId, 'dispatch requestId'); d.messageId ??= d.requestId; return d; }
   sessionOwner(sessionId) {
+    // P-75: a Session may be reused across sequential Attempts of the same Node (or review cycles of
+    // the same Gate). Resolve to the in-flight context first, else the latest one, so fleet_submit,
+    // steering and recovery always address the current round.
+    let fallback = null;
     for (const w of this.#state.workspaces) for (const t of w.tickets) {
-      for (const [nodeId, n] of Object.entries(t.execution?.nodes ?? {})) for (const a of n.attempts) if (a.sessionId === sessionId) return { workspaceId: w.id, ticketId: t.id, nodeId, attemptId: a.id };
-      for (const [gateId, g] of Object.entries(t.execution?.gates ?? {})) for (const cycle of [g, ...(g.history ?? [])]) if (cycle.dispatch?.sessionId === sessionId) return { workspaceId: w.id, ticketId: t.id, gateId, cycle: cycle.cycle };
-    } return null;
+      for (const [nodeId, n] of Object.entries(t.execution?.nodes ?? {})) {
+        for (let i = n.attempts.length - 1; i >= 0; i--) {
+          const a = n.attempts[i];
+          if (a.sessionId !== sessionId) continue;
+          const owner = { workspaceId: w.id, ticketId: t.id, nodeId, attemptId: a.id };
+          if (a.status === 'running') return owner;
+          fallback ??= owner;
+        }
+      }
+      for (const [gateId, g] of Object.entries(t.execution?.gates ?? {})) {
+        for (const cycle of [g, ...(g.history ?? []).slice().reverse()]) {
+          if (cycle.dispatch?.sessionId !== sessionId) continue;
+          const owner = { workspaceId: w.id, ticketId: t.id, gateId, cycle: cycle.cycle };
+          if (inflight(cycle.dispatch)) return owner;
+          fallback ??= owner;
+        }
+      }
+    } return fallback;
   }
-  /** P-51: the Agent executes a start/resume decision the user explicitly made in the conversation.
-   * Only start/resume exist here; auditable as an Agent acting via a user request, never on its own. */
+  /** P-77: Admin grants live in the global settings chain; only humans edit them. */
+  adminConfig() { return copy(this.#state.settings.admin); }
+  adminGranted(caller) { return this.#state.settings.admin.workspaces.some(e => e.workspaceId === caller); }
+  adminCan(caller, target) {
+    const entry = this.#state.settings.admin.workspaces.find(e => e.workspaceId === caller);
+    if (!entry || !target) return false;
+    return entry.scope === 'all' || (Array.isArray(entry.scope) && entry.scope.includes(target));
+  }
+  #setAdminGrant(targetWs, actor, scope) {
+    requireThat(scope === 'all' || (Array.isArray(scope) && scope.length && scope.every(id => this.#state.workspaces.some(w => w.id === id))), 'invalid-input', 'Admin scope must be "all" or existing Workspace IDs.');
+    const admin = copy(this.#state.settings.admin);
+    admin.workspaces = [...admin.workspaces.filter(e => e.workspaceId !== targetWs), { workspaceId: targetWs, scope: scope === 'all' ? 'all' : [...new Set(scope)], grantedBy: actor.userId ?? actor.kind ?? 'human', grantedAt: now() }];
+    this.#state.settings = { ...this.#state.settings, revision: this.#state.settings.revision + 1, admin };
+    return copy(admin);
+  }
+  #revokeAdminGrant(targetWs) {
+    const admin = copy(this.#state.settings.admin);
+    const next = admin.workspaces.filter(e => e.workspaceId !== targetWs);
+    requireThat(next.length !== admin.workspaces.length, 'unknown-admin', 'This Workspace is not an Admin.');
+    admin.workspaces = next;
+    this.#state.settings = { ...this.#state.settings, revision: this.#state.settings.revision + 1, admin: admin };
+    return copy(admin);
+  }
+  #saveTemplate(ws, actor, input) {
+    const data = copy(object(input, 'Template'));
+    requireThat(Object.keys(data).every(k => ['kind', 'id', 'name', 'content', 'source', 'update'].includes(k)), 'invalid-input', 'Unexpected Template input.');
+    text(data.id, 'Template ID'); requireThat(['agent', 'orchestration'].includes(data.kind), 'invalid-input', 'Unknown Template kind.');
+    if (data.update !== undefined) requireThat(typeof data.update === 'boolean', 'invalid-input', 'Template update must be a boolean.');
+    const content = this.#templateContent(data.kind, data.content);
+    if (data.name !== undefined) text(data.name, 'Template name');
+    const source = data.source === undefined || data.source === null ? undefined : this.#templateSource(data.source, data.kind, ws);
+    if (data.update) {
+      // P-72: updating an existing template keeps history and increments revision (same path as root-agent/root-flow).
+      const existing = this.#template(data.id, data.kind);
+      this.#replaceTemplate(existing.id, content, actor);
+      if (data.name !== undefined) existing.name = data.name;
+      if (source !== undefined) existing.source = source;
+      return copy(existing);
+    }
+    requireThat(!this.#state.templates.some(t => t.id === data.id), 'duplicate-id', 'Template exists.');
+    const time = now(), t = { id: data.id, kind: data.kind, name: data.name ?? data.id, revision: 1, content, source: source ?? null, history: [], createdAt: time, updatedAt: time };
+    this.#state.templates.push(t); return copy(t);
+  }
+  #replaceRootAgent(ws, actor, id, profile) {
+    const content = this.#templateContent('agent', { ...this.#template(id, 'agent').content, profile: copy(object(profile, 'profile')) });
+    return this.#replaceTemplate(this.#template(id, 'agent').id, content, actor);
+  }
+  #replaceRootOrchestration(ws, actor, id, definition) {
+    return this.#replaceTemplate(this.#template(id, 'orchestration').id, this.#templateContent('orchestration', definition), actor);
+  }
+  /** P-77: the Admin-granted Agent writes templates or another Workspace's plan with an audited actor. */
+  adminAgent(ws, sessionId, scope) {
+    const actor = { kind: 'agent', userId: text(sessionId, 'session ID'), via: 'user-request', adminScope: scope ?? 'all' };
+    return Object.freeze({
+      saveTemplate: input => this.#saveTemplate(ws, actor, input),
+      replaceRootAgent: (id, profile) => this.#replaceRootAgent(ws, actor, id, profile),
+      replaceRootOrchestration: (id, definition) => this.#replaceRootOrchestration(ws, actor, id, definition),
+      savePlan: (ticketId, input) => this.saveDraftTicket(ws, { ...input, ticketId, actor })
+    });
+  }
+  /** P-51/P-76: the Agent executes a start/resume/stop decision the user explicitly made in the
+   * conversation. Auditable as an Agent acting via a user request, never on its own. */
   agent(ws, sessionId) {
     const actor = { kind: 'agent', userId: text(sessionId, 'session ID'), via: 'user-request' };
-    return Object.freeze({ start: id => this.#start(ws, id, actor), resume: id => this.#start(ws, id, actor, true) });
+    return Object.freeze({ start: id => this.#start(ws, id, actor), resume: id => this.#start(ws, id, actor, true), stop: id => this.#stopTicket(this.#ticket(ws, id), actor) });
   }
   human(ws, userId) {
     const actor = { kind: 'human', userId: text(userId, 'user ID') };
@@ -893,7 +1019,9 @@ export class FleetCore {
         delete t.abandonedAt; this.#touch(t); this.#event(t, 'ticket-abandon-reversed', actor); return copy(t);
       },
       instantiateTemplate: input => this.instantiateTemplate(ws, { ...object(input, 'instantiate input'), actor }),
-      stop: id => { const t = this.#ticket(ws, id); if (['stopped', 'stop-requested'].includes(t.status)) return copy(t); requireThat(t.status === 'running' || t.status === 'delivered' && Object.values(t.execution.gates).some(g => inflight(g.dispatch)), 'not-running', 'No execution to stop.'); t.status = 'stop-requested'; for (const n of Object.values(t.execution.nodes)) if (n.status === 'pending') n.status = 'cancelled'; this.#touch(t); this.#event(t, 'stop-requested', actor); this.#settle(t); return copy(t); },
+      stop: id => this.#stopTicket(this.#ticket(ws, id), actor),
+      grantAdmin: (scope = 'all') => this.#setAdminGrant(ws, actor, scope),
+      revokeAdmin: () => this.#revokeAdminGrant(ws),
       commentNode: (id, nodeId, message) => { const t = this.#ticket(ws, id), n = this.#node(t, nodeId); text(message, 'message'); const row = { id: randomUUID(), time: now(), actor: copy(actor), intent: 'discussion', text: message }; n.thread.push(row); this.#touch(t); this.#event(t, 'node-comment', actor, { nodeId, messageId: row.id }); return copy(row); },
       setPendingNodeModel: (id, nodeId, selection, expectedRevision) => {
         const t = this.#ticket(ws, id);
@@ -941,19 +1069,122 @@ export class FleetCore {
         const nextPlan = planInput(replacement); const fresh = this.saveDraftTicket(ws, { sessionId: old.originSessionId ?? (originSessionId === undefined ? null : text(originSessionId, 'origin Session ID')), plan: nextPlan, actor });
         delete old.dependencyAuthorization; old.status = 'superseded'; old.supersededBy = fresh.id; this.#touch(old); this.#event(old, 'ticket-superseded', actor, { supersededBy: fresh.id, original: archived(old.plan, 'pre-regeneration-plan') }); return fresh;
       },
-      replaceRootAgent: (id, profile) => this.#replaceTemplate(id, this.#templateContent('agent', { ...this.#template(id, 'agent').content, profile: copy(object(profile, 'profile')) }), actor),
-      replaceRootOrchestration: (id, definition) => this.#replaceTemplate(this.#template(id, 'orchestration').id, this.#templateContent('orchestration', definition), actor),
-      saveTemplate: input => { const data = copy(object(input, 'Template')); text(data.id, 'Template ID'); requireThat(['agent', 'orchestration'].includes(data.kind), 'invalid-input', 'Unknown Template kind.'); requireThat(!this.#state.templates.some(t => t.id === data.id), 'duplicate-id', 'Template exists.'); const content = this.#templateContent(data.kind, data.content); if (data.name !== undefined) text(data.name, 'Template name'); if (data.source !== undefined && data.source !== null) { object(data.source, 'Template source'); requireThat(Object.keys(data.source).every(k => ['templateId', 'templateRevision'].includes(k)) && Number.isSafeInteger(data.source.templateRevision), 'invalid-input', 'Template source needs an actual version.'); const source = this.#template(data.source.templateId, data.kind); requireThat(source.revision === data.source.templateRevision || source.history.some(h => h.revision === data.source.templateRevision), 'invalid-input', 'Unknown Template source revision.'); } const time = now(), t = { id: data.id, kind: data.kind, name: data.name ?? data.id, revision: 1, content, source: data.source ?? null, history: [], createdAt: time, updatedAt: time }; this.#state.templates.push(t); return copy(t); },
+      replaceRootAgent: (id, profile) => this.#replaceRootAgent(ws, actor, id, profile),
+      replaceRootOrchestration: (id, definition) => this.#replaceRootOrchestration(ws, actor, id, definition),
+      saveTemplate: input => this.#saveTemplate(ws, actor, input),
+      // P-73: copy the Ticket's current saved plan (any status; running reads the saved plan, not a
+      // runtime snapshot) into Root templates. Agent templates are written first, orchestration last,
+      // inside this one Root transaction; any failure publishes nothing. The Ticket itself is not in
+      // this write set — the Service appends a single templates-saved activity afterwards.
+      saveTemplateFromTicket: input => {
+        const data = copy(object(input, 'Template save input'));
+        requireThat(Object.keys(data).every(k => ['ticketId', 'id', 'name', 'agentMapping', 'source', 'update'].includes(k)), 'invalid-input', 'Unexpected template-save-from-ticket field.');
+        if (data.update !== undefined) requireThat(typeof data.update === 'boolean', 'invalid-input', 'Template update must be a boolean.');
+        const ticket = this.#ticket(ws, data.ticketId);
+        requireThat(isCurrentPlan(ticket.plan), 'legacy-plan', 'Legacy Ticket plans must be repaired or regenerated before saving as a template.');
+        const plan = ticket.plan, mapping = object(data.agentMapping, 'agentMapping');
+        const localIds = Object.keys(plan.agents ?? {});
+        requireThat(Object.keys(mapping).every(k => localIds.includes(k)), 'invalid-input', 'agentMapping references an unknown local Agent.');
+        requireThat(localIds.every(k => Object.hasOwn(mapping, k)), 'invalid-input', 'agentMapping must choose link, save or leave for every local Agent.');
+        const agentWrites = [];
+        for (const [localId, entry] of Object.entries(mapping)) {
+          const e = object(entry, `agentMapping.${localId}`);
+          requireThat(Object.keys(e).every(k => ['mode', 'templateId', 'id', 'name'].includes(k)), 'invalid-input', 'Unexpected agentMapping field.');
+          requireThat(['link', 'save', 'leave'].includes(e.mode), 'invalid-input', 'agentMapping mode must be link, save or leave.');
+          if (e.mode === 'link') {
+            requireThat(e.id === undefined && e.name === undefined, 'invalid-input', 'link mode accepts templateId only.');
+            this.#template(text(e.templateId, 'agentMapping templateId'), 'agent');
+          } else if (e.mode === 'save') {
+            const id = text(e.id, 'new Agent Template ID');
+            requireThat(!/\s/.test(id), 'invalid-input', 'Template ID must not contain whitespace.');
+            requireThat(!this.#state.templates.some(t => t.id === id), 'duplicate-id', `Agent Template ${id} exists; link it instead of saving a duplicate.`);
+            if (e.name !== undefined) text(e.name, 'Agent Template name');
+            agentWrites.push({ localId, id, name: e.name });
+          } else requireThat(e.templateId === undefined && e.id === undefined && e.name === undefined, 'invalid-input', 'leave mode accepts no extra fields.');
+        }
+        const orchId = text(data.id, 'Template ID');
+        requireThat(!/\s/.test(orchId), 'invalid-input', 'Template ID must not contain whitespace.');
+        if (data.update) this.#template(orchId, 'orchestration');
+        else requireThat(!this.#state.templates.some(t => t.id === orchId), 'duplicate-id', 'Template exists.');
+        const newIds = agentWrites.map(w => w.id);
+        requireThat(new Set(newIds).size === newIds.length, 'duplicate-id', 'Duplicate new Agent Template IDs in agentMapping.');
+        requireThat(!newIds.includes(orchId), 'duplicate-id', 'Agent and orchestration Template IDs must differ.');
+        const content = this.#templateContent('orchestration', orchestrationContentFromPlan(plan, mapping));
+        const source = { ticketId: ticket.id, ticketRevision: ticket.revision, workspaceId: ws };
+        if (data.source !== undefined) {
+          const claimed = object(data.source, 'source');
+          requireThat(Object.keys(claimed).every(k => ['ticketId', 'ticketRevision', 'workspaceId'].includes(k)) && claimed.ticketId === source.ticketId && claimed.ticketRevision === source.ticketRevision && claimed.workspaceId === ws, 'invalid-input', 'source must record the current Ticket revision.');
+        }
+        if (data.name !== undefined) text(data.name, 'Template name');
+        const agentTemplates = [], prepared = agentWrites.map(write => {
+          const agent = plan.agents[write.localId];
+          return { write, content: this.#templateContent('agent', { ...(agent.name !== undefined ? { name: agent.name } : {}), profile: agent.profile }) };
+        });
+        for (const { write, content: agentContent } of prepared) {
+          const agent = plan.agents[write.localId];
+          // A local Agent may back more than one node; record the node only when it is unambiguous.
+          const nodeIds = (plan.nodes ?? []).filter(n => n.agentId === write.localId).map(n => n.id);
+          const agentSource = nodeIds.length === 1 ? { ...copy(source), nodeId: nodeIds[0] } : copy(source);
+          const time = now(), t = { id: write.id, kind: 'agent', name: write.name ?? agent.name ?? write.id, revision: 1, content: agentContent, source: agentSource, history: [], createdAt: time, updatedAt: time };
+          this.#state.templates.push(t); agentTemplates.push(copy(t));
+        }
+        let orchestration;
+        if (data.update) {
+          const existing = this.#template(orchId, 'orchestration');
+          this.#replaceTemplate(existing.id, content, actor);
+          if (data.name !== undefined) existing.name = data.name;
+          existing.source = copy(source);
+          orchestration = copy(existing);
+        } else {
+          const time = now(), t = { id: orchId, kind: 'orchestration', name: data.name ?? orchId, revision: 1, content, source: copy(source), history: [], createdAt: time, updatedAt: time };
+          this.#state.templates.push(t); orchestration = copy(t);
+        }
+        return { template: orchestration, agentTemplates, ticketId: ticket.id, ticketRevision: ticket.revision };
+      },
       replaceGlobalSettings: input => { const next = normalizeSettings(input); next.revision = this.#state.settings.revision + 1; this.#state.settings = next; return copy(next); }
     });
   }
   #templateContent(kind, input) {
     const content = copy(object(input, 'Template content'));
-    requireThat(Object.keys(content).every(key => (kind === 'agent' ? ['name', 'profile'] : ['nodes', 'gates']).includes(key)), 'invalid-input', 'Template content cannot include execution or identity fields.');
+    requireThat(Object.keys(content).every(key => (kind === 'agent' ? ['name', 'profile'] : ['nodes', 'gates', 'logicGates', 'defaults']).includes(key)), 'invalid-input', 'Template content cannot include execution or identity fields.');
     if (kind === 'agent') return planInput({ goal: 'template validation', agents: { local: content } }).agents.local;
-    const plan = planInput({ goal: 'template validation', nodes: content.nodes, gates: content.gates ?? [] });
+    // P-72: reusable content cannot carry concrete Ticket/series references; save-from-ticket strips them.
+    for (const node of Array.isArray(content.nodes) ? content.nodes : []) {
+      if (node && typeof node === 'object' && (node.ticketDependencies !== undefined || node.ticketDependencySeries !== undefined)) fail('invalid-input', 'Template nodes cannot reference concrete Tickets or series; remove ticketDependencies/ticketDependencySeries.');
+    }
+    let defaults;
+    if (content.defaults !== undefined) {
+      const inputDefaults = object(content.defaults, 'Template defaults');
+      requireThat(Object.keys(inputDefaults).every(k => ['goal', 'inputs', 'deliverables', 'criteria', 'requirements'].includes(k)), 'invalid-input', 'Template defaults accept goal, inputs, deliverables, criteria and requirements only.');
+      if (inputDefaults.goal !== undefined) text(inputDefaults.goal, 'Template default goal');
+      const probe = planInput({ goal: 'template validation', ...inputDefaults });
+      const errors = validatePlan(probe, { mode: 'save' }).errors.filter(e => ['goal', 'inputs', 'deliverables', 'criteria', 'requirements'].some(key => e.path === key || e.path.startsWith(`${key}[`) || e.path.startsWith(`${key}.`)));
+      requireThat(!errors.length, 'invalid-input', `Invalid Template defaults: ${errors.map(e => `${e.path}: ${e.message}`).join(' ')}`);
+      defaults = {};
+      for (const key of ['goal', 'inputs', 'deliverables', 'criteria', 'requirements']) if (Object.hasOwn(inputDefaults, key)) defaults[key] = probe[key];
+    }
+    const plan = planInput({ goal: 'template validation', nodes: content.nodes, gates: content.gates ?? [], ...(content.logicGates !== undefined ? { logicGates: content.logicGates } : {}) });
     requireThat(!validatePlan(plan, { mode: 'start' }).errors.some(e => e.code === 'invalid-flow'), 'invalid-flow', 'Invalid Template graph.');
-    return { nodes: plan.nodes, gates: plan.gates };
+    return { nodes: plan.nodes, gates: plan.gates, ...(content.logicGates !== undefined ? { logicGates: plan.logicGates } : {}), ...(defaults !== undefined ? { defaults } : {}) };
+  }
+  /** P-72／P-73 provenance is display-only: an existing same-kind Template revision, or the exact
+   * current revision of a Ticket in this Workspace (Agent saves may also name the source node). */
+  #templateSource(source, kind, ws) {
+    const data = object(source, 'Template source');
+    if (Object.hasOwn(data, 'templateId')) {
+      requireThat(Object.keys(data).every(k => ['templateId', 'templateRevision'].includes(k)) && typeof data.templateId === 'string' && data.templateId && Number.isSafeInteger(data.templateRevision), 'invalid-input', 'Template source needs an actual version.');
+      const target = this.#template(data.templateId, kind);
+      requireThat(target.revision === data.templateRevision || target.history.some(h => h.revision === data.templateRevision), 'invalid-input', 'Unknown Template source revision.');
+      return copy(data);
+    }
+    requireThat(Object.keys(data).every(k => ['ticketId', 'ticketRevision', 'workspaceId', 'nodeId'].includes(k)), 'invalid-input', 'Invalid source Ticket.');
+    const ticketId = text(data.ticketId, 'source Ticket ID');
+    requireThat(text(data.workspaceId, 'source Workspace ID') === ws, 'invalid-input', 'Template source Workspace must be the current Workspace.');
+    requireThat(Number.isSafeInteger(data.ticketRevision) && data.ticketRevision > 0, 'invalid-input', 'Invalid source Ticket revision.');
+    const ticket = this.#ticket(ws, ticketId);
+    requireThat(ticket.revision === data.ticketRevision, 'stale-revision', 'Source Ticket revision changed; reload before saving the template.');
+    if (data.nodeId !== undefined) requireThat(Array.isArray(ticket.plan?.nodes) && ticket.plan.nodes.some(n => n.id === text(data.nodeId, 'source node ID')), 'invalid-input', 'Source node does not exist in the Ticket plan.');
+    return copy(data);
   }
   #template(id, kind) { const t = this.#state.templates.find(t => t.id === id && (!kind || t.kind === kind)); requireThat(t, kind === 'agent' ? 'unknown-agent' : 'unknown-flow', 'Unknown Root Template.'); return t; }
   #replaceTemplate(id, content, actor) { const t = this.#template(id); t.history.push({ revision: t.revision, content: copy(t.content), source: copy(t.source), actor: copy(actor), time: now() }); t.content = content; t.revision++; t.updatedAt = now(); return projectTemplate(t); }
@@ -1009,7 +1240,7 @@ export class FleetCore {
         if (inputs.size) attempt.upstreamTickets = copy([...inputs.values()]);
         n.attempts.push(attempt); n.status = 'running'; this.#touch(t); this.#event(t, 'node-claimed', { kind: 'system' }, { nodeId, attemptId: attempt.id }); return this.#worker(ws, t, nodeId, attempt); },
       resumeNode: (id, nodeId, attemptId) => { const t = this.#ticket(ws, id), n = this.#node(t, nodeId), a = n.attempts.at(-1); requireThat(['running', 'stop-requested'].includes(t.status) && n.status === 'running' && a?.status === 'running' && a.id === attemptId, 'stale-attempt', 'Attempt is no longer active.'); return this.#worker(ws, t, nodeId, a); },
-      recordGateDispatch: (id, gateId, data, expectedRequestId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId), d = this.#dispatch(data); requireThat(t.status === 'running' || g.dispatch || g.humanOverride, 'not-running', 'Gate is no longer active.'); requireThat(t.status !== 'stopped' || !inflight(d), 'not-running', 'Stopped Ticket cannot dispatch.'); requireThat(this.#definition(t, gateId, 'gates').reviewer.kind === 'agent' && this.#sourcesComplete(t, gateId), 'not-reviewable', 'Gate is not ready.'); if (expectedRequestId === null) requireThat(!g.dispatch, 'stale-dispatch', 'Gate is already claimed.'); else if (expectedRequestId !== undefined) requireThat(g.dispatch?.requestId === expectedRequestId, 'stale-dispatch', 'Gate dispatch changed.'); if (d.sessionId && d.sessionId !== g.dispatch?.sessionId) requireThat(!this.sessionOwner(d.sessionId), 'session-conflict', 'Review Session is already owned.'); if (!g.dispatch && d.phase === 'created') g.configRevision = t.execution.currentConfigRevision; g.dispatch = d; this.#touch(t); this.#settle(t); return copy(d); },
+      recordGateDispatch: (id, gateId, data, expectedRequestId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId), d = this.#dispatch(data); requireThat(t.status === 'running' || g.dispatch || g.humanOverride, 'not-running', 'Gate is no longer active.'); requireThat(t.status !== 'stopped' || !inflight(d), 'not-running', 'Stopped Ticket cannot dispatch.'); requireThat(this.#definition(t, gateId, 'gates').reviewer.kind === 'agent' && this.#sourcesComplete(t, gateId), 'not-reviewable', 'Gate is not ready.'); if (expectedRequestId === null) requireThat(!g.dispatch, 'stale-dispatch', 'Gate is already claimed.'); else if (expectedRequestId !== undefined) requireThat(g.dispatch?.requestId === expectedRequestId, 'stale-dispatch', 'Gate dispatch changed.'); if (d.sessionId && d.sessionId !== g.dispatch?.sessionId) { const owner = this.sessionOwner(d.sessionId); const priorCycle = owner?.gateId === gateId && owner.ticketId === t.id ? (owner.cycle === g.cycle ? g : (g.history ?? []).find(h => h.cycle === owner.cycle)) : null; requireThat(!owner || (priorCycle && !inflight(priorCycle.dispatch)), 'session-conflict', 'Review Session is already owned.'); } if (!g.dispatch && d.phase === 'created') g.configRevision = t.execution.currentConfigRevision; g.dispatch = d; this.#touch(t); this.#settle(t); return copy(d); },
       reviewer: (id, gateId) => { const t = this.#ticket(ws, id), g = this.#gate(t, gateId), definition = this.#definition(t, gateId, 'gates'); requireThat(definition.reviewer.kind === 'agent' && this.#sourcesComplete(t, gateId), 'not-reviewable', 'Gate is not ready for Agent review.'); const node = this.#definition(t, definition.reviewer.nodeId), cycle = g.cycle; let submitted = false; return Object.freeze({ submit: (decision, evidence) => { requireThat(cycle === g.cycle, 'stale-review', 'Review belongs to another cycle.'); requireThat(!submitted, 'duplicate-review', 'Review already submitted.'); const result = this.#review(t, gateId, { kind: 'agent-reviewer', nodeId: node.id, agentId: node.agentId }, decision, evidence); submitted = true; return result; } }); },
       // P-46 delivery settlement: pending export, recorded delivery and the human override exit.
       deliveryPending: id => {
@@ -1049,23 +1280,22 @@ export class FleetCore {
         const due = [];
         for (const [gateId, g] of Object.entries(t.execution.gates)) {
           if (g.status !== 'returned' || g.humanOverride) continue;
-          const definition = this.#definition(t, gateId, 'gates'), rework = definition.rework;
-          if (!rework || !(rework.maxRounds > 0)) continue;
-          const isAgent = definition.reviewer.kind === 'agent';
-          if (isAgent && (g.autoReworkRounds ?? 0) >= rework.maxRounds) continue;
+          const definition = this.#definition(t, gateId, 'gates'), policy = reworkPolicy(definition);
+          if (!policy.enabled) continue;
+          if (policy.isAgent && (g.autoReworkRounds ?? 0) >= policy.maxRounds) continue;
           const findings = (g.reviews ?? []).filter(r => r.decision === 'returned' && r.cycle === g.cycle).flatMap(r => r.findings ?? []);
-          const targetNodes = (rework.targetNodes ?? definition.from).filter(id => this.#node(t,id).status !== 'skipped');
-          if (targetNodes.length) due.push({ gateId, targetNodes, findings, autoRound: isAgent });
+          const targetNodes = (definition.rework?.targetNodes ?? definition.from).filter(id => this.#node(t,id).status !== 'skipped');
+          if (targetNodes.length) due.push({ gateId, targetNodes, findings, autoRound: policy.isAgent });
         }
         return due;
       },
       applyRework: (id, gateId) => {
         const t = this.#ticket(ws, id), g = this.#gate(t, gateId), definition = this.#definition(t, gateId, 'gates');
         requireThat(t.status === 'running' && g.status === 'returned' && !g.humanOverride, 'state-conflict', 'Gate is not ready for rework.');
-        const rework = definition.rework; requireThat(rework && rework.maxRounds > 0, 'state-conflict', 'Gate has no enabled rework policy.');
-        const isAgent = definition.reviewer.kind === 'agent';
-        if (isAgent) requireThat((g.autoReworkRounds ?? 0) < rework.maxRounds, 'state-conflict', 'Rework budget is exhausted.');
-        const targetNodes = (rework.targetNodes ?? definition.from).filter(id => this.#node(t,id).status !== 'skipped');
+        const policy = reworkPolicy(definition); requireThat(policy.enabled, 'state-conflict', 'Gate has no enabled rework policy.');
+        const isAgent = policy.isAgent;
+        if (isAgent) requireThat((g.autoReworkRounds ?? 0) < policy.maxRounds, 'state-conflict', 'Rework budget is exhausted.');
+        const targetNodes = (definition.rework?.targetNodes ?? definition.from).filter(id => this.#node(t,id).status !== 'skipped');
         const findings = (g.reviews ?? []).filter(r => r.decision === 'returned' && r.cycle === g.cycle).flatMap(r => r.findings ?? []);
         const actor = { kind: 'system' }, reason = `Gate ${gateId} returned; pre-approved rework. Findings: ${JSON.stringify(findings)}`;
         this.#retry(t, targetNodes, reason, actor);
@@ -1076,10 +1306,10 @@ export class FleetCore {
       noteReworkExhausted: id => {
         const t = this.#ticket(ws, id); if (t.status !== 'running') return;
         for (const [gateId, g] of Object.entries(t.execution.gates)) {
-          const d = this.#definition(t, gateId, 'gates');
-          if (g.status !== 'returned' || g.humanOverride || d.reviewer.kind !== 'agent' || !d.rework || !(d.rework.maxRounds > 0) || (g.autoReworkRounds ?? 0) < d.rework.maxRounds) continue;
+          const d = this.#definition(t, gateId, 'gates'), policy = reworkPolicy(d);
+          if (g.status !== 'returned' || g.humanOverride || !policy.isAgent || !policy.enabled || (g.autoReworkRounds ?? 0) < policy.maxRounds) continue;
           if (t.activity.some(a => a.type === 'rework-exhausted' && a.detail?.gateId === gateId && a.detail?.cycle === g.cycle)) continue;
-          this.#touch(t); this.#event(t, 'rework-exhausted', { kind: 'system' }, { gateId, cycle: g.cycle, autoReworkRounds: g.autoReworkRounds, maxRounds: d.rework.maxRounds });
+          this.#touch(t); this.#event(t, 'rework-exhausted', { kind: 'system' }, { gateId, cycle: g.cycle, autoReworkRounds: g.autoReworkRounds, maxRounds: policy.maxRounds });
         }
       }
     });

@@ -185,9 +185,11 @@ test('retrying a failed node keeps its already-passed incoming Gate so no second
   assert.equal(t.execution.nodes.b.status, 'pending');
   assert.doesNotThrow(() => f.runtime.claimNode('t', 'b'), 'retried node is runnable without re-approval');
 });
-test('late stale workers cannot complete a later retry; capability rejects duplicate Session ownership', () => {
+test('late stale workers cannot complete a later retry; a Node may reuse its own terminal Session (P-75)', () => {
   const f = fixture(); f.start(); const w = f.runtime.claimNode('t', 'a'); w.attachSession('s'); w.fail('failed'); f.human.retryNode('t', 'a', 'retry'); const next = f.runtime.claimNode('t', 'a');
-  rejects(() => w.complete('late'), 'stale-attempt'); rejects(() => next.attachSession('s'), 'session-conflict'); next.attachSession('s2');
+  rejects(() => w.complete('late'), 'stale-attempt');
+  assert.doesNotThrow(() => next.attachSession('s'), 'sequential reuse of the same Node Session is allowed');
+  assert.equal(f.core.sessionOwner('s').attemptId, next.attemptId, 'ownership follows the current Attempt');
   assert.equal(f.read().execution.nodes.a.attempts[0].sessionId, 's');
 });
 test('source refs use explicit known template history; edits preserve provenance and Root changes do not rewrite execution', () => {

@@ -4,7 +4,7 @@ const root = new URL('../', import.meta.url);
 const { name: packageName } = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
 const files = ['fleet-model.js', 'fleet-workspace-nav.js', 'fleet-theme.js', 'fleet-ui.js', 'fleet-locale.js', 'fleet-draft-client.js'];
 const ownedModuleImports = {
-  'fleet-ui.js': ["import { TICKET_STATUSES } from './fleet-model.js';", "import { projectTicket, validatePlan, graphLevels, isIncompatibleDraft, readableTitle, stagePlanView, effectiveSeriesTiming, isUtcInstant, seriesRecurrence, seriesScheduledAt } from './fleet-model.js';"],
+  'fleet-ui.js': ["import { TICKET_STATUSES } from './fleet-model.js';", "import { projectTicket, validatePlan, graphLevels, isIncompatibleDraft, isCurrentPlan, readableTitle, stagePlanView, effectiveSeriesTiming, isUtcInstant, seriesRecurrence, seriesScheduledAt, orchestrationContentFromPlan } from './fleet-model.js';"],
   'fleet-draft-client.js': ["import { fleetResponseError } from './fleet-locale.js';", "import { TICKET_STATUSES } from './fleet-model.js';"]
 };
 const client = await readFile(new URL('src/fleet-client.js', root), 'utf8');

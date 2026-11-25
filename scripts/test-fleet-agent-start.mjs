@@ -82,6 +82,7 @@ function chatHarness({ owned = false } = {}) {
     registerWorkspace: async () => {},
     ownsSession: async () => owned,
     agentStart: async (workspaceId, sessionId, ticketId) => { calls.push(['agentStart', workspaceId, sessionId, ticketId]); return projectTicket({ id: ticketId, workspaceId, originSessionId: sessionId, status: 'running', revision: 3, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }); },
+    agentStop: async (workspaceId, sessionId, ticketId) => { calls.push(['agentStop', workspaceId, sessionId, ticketId]); return projectTicket({ id: ticketId, workspaceId, originSessionId: sessionId, status: 'running', revision: 3, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }); },
     catalog: async () => ({ agents: [], orchestrations: [], workspaces: [] })
   };
   const ctx = { tools: { register: d => { tools.set(d.name, d); return () => tools.delete(d.name); } }, commands: { register: () => () => {} } };
@@ -104,6 +105,37 @@ test('fleet_start refuses execution Sessions through the planning-context guard'
   const definition = h.tools.get('fleet_start');
   await assert.rejects(definition.execute({ ticketId: 't' }, { agent: { id: 'exec' } }), /Execution Sessions/);
   assert.deepEqual(h.calls, []);
+});
+
+test('agentStop stops a running Ticket as the Agent acting via user-request and cancels pending nodes', async t => {
+  const f = await fixture(t);
+  await f.service.saveDraftTicket('a', { id: 't', sessionId: 'origin', plan: plan() });
+  await f.service.human('a', 'u', 'start', ['t']);
+  const stopped = await f.service.agentStop('a', 'origin', 't');
+  assert.ok(['stop-requested', 'stopped'].includes(stopped.status), 'stop takes effect immediately when nothing is in flight');
+  const event = stopped.activity.filter(a => a.type === 'stop-requested').at(-1);
+  assert.deepEqual(event.actor, { kind: 'agent', userId: 'origin', via: 'user-request' });
+  const again = await f.service.agentStop('a', 'origin', 't');
+  assert.ok(['stop-requested', 'stopped'].includes(again.status), 'repeated stop is idempotent');
+});
+test('agentStop refuses non-running Tickets and unknown IDs with a next-step message', async t => {
+  const f = await fixture(t);
+  await f.service.saveDraftTicket('a', { id: 't', sessionId: 'origin', plan: plan() });
+  await assert.rejects(f.service.agentStop('a', 'origin', 't'), e => e.code === 'not-running');
+  await assert.rejects(f.service.agentStop('a', 'origin', 'missing'), e => e.code === 'unknown-ticket');
+});
+test('fleet_stop tool is registered, delegates to agentStop and refuses execution Sessions', async t => {
+  const h = chatHarness();
+  const definition = h.tools.get('fleet_stop');
+  assert.ok(definition);
+  assert.equal(definition.parameters.ticketId.required, true);
+  assert.match(definition.description, /ONLY call when the user explicitly asked to stop/);
+  const result = await definition.execute({ ticketId: 't' }, { agent: { id: 'any' } });
+  assert.deepEqual(h.calls, [['agentStop', 'w', 's-1', 't']]);
+  assert.equal(JSON.parse(result.text).status, 'running');
+  const owned = chatHarness({ owned: true });
+  await assert.rejects(owned.tools.get('fleet_stop').execute({ ticketId: 't' }, { agent: { id: 'exec' } }), /Execution Sessions/);
+  assert.deepEqual(owned.calls, []);
 });
 
 // ---- Editor start button rendering (static markup) ----

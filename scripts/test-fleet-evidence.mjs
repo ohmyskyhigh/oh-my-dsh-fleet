@@ -106,7 +106,8 @@ test('projection carries artifacts/deliverables/delivery, gate coverage/rework a
   assert.equal(p.deliverables[0].reviewStatus, 'unreviewed');
   assert.deepEqual(p.delivery, null);
   assert.equal(p.gates[0].coverage, 'not-passed');
-  assert.deepEqual(p.gates[0].rework, { enabled: false, maxRounds: 0, autoReworkRounds: 0, unlimited: true });
+  assert.deepEqual(p.gates[0].rework, { enabled: true, maxRounds: 0, autoReworkRounds: 0, unlimited: true, reworkSession: 'reuse' });
+  assert.equal(p.gates[0].reviewSession, 'reuse');
   assert.equal(p.nodes.find(n => n.id === 'write').attempts.at(-1).completion.evidenceKind, 'agent-report');
   assert.equal(JSON.stringify(f.read()), before, 'projection never mutates the persisted body');
 });
@@ -286,6 +287,45 @@ test('human gate rework is unlimited and never spends budget; manual retry never
   const before = f.read().execution.gates.quality.autoReworkRounds;
   f.human.retryNode('t', 'write', 'manual fix');
   assert.equal(f.read().execution.gates.quality.autoReworkRounds, before);
+});
+
+test('P-74: Agent Gate rework is on by default (cap 3), explicit 0 disables, human Gate returns rework by default', () => {
+  const bare = reviewer => corePlan({ deliverables: [], nodes: [{ id: 'write', agentId: 'writer', dependsOn: [], task: { prompt: 'write' } }, { id: 'rev', agentId: 'rev', dependsOn: [], task: { prompt: 'review' } }], gates: [{ id: 'quality', from: ['write'], to: [], reviewer }] });
+  const f = coreFixture(bare({ kind: 'agent', nodeId: 'rev' }));
+  for (let i = 0; i < 3; i++) {
+    completeWrite(f); returnGate(f, `round ${i}`);
+    assert.equal(f.runtime.reworkDue('t').length, 1, 'default policy keeps the gate due');
+    f.runtime.applyRework('t', 'quality');
+  }
+  completeWrite(f); returnGate(f, 'fourth');
+  assert.deepEqual(f.runtime.reworkDue('t'), [], 'default cap is 3 auto rounds');
+  rejects(() => f.runtime.applyRework('t', 'quality'), 'state-conflict');
+  f.runtime.noteReworkExhausted('t');
+  assert.equal(f.read().activity.filter(a => a.type === 'rework-exhausted').length, 1);
+  const off = coreFixture(corePlan({ deliverables: [], nodes: [{ id: 'write', agentId: 'writer', dependsOn: [], task: { prompt: 'write' } }, { id: 'rev', agentId: 'rev', dependsOn: [], task: { prompt: 'review' } }], gates: [{ id: 'quality', from: ['write'], to: [], reviewer: { kind: 'agent', nodeId: 'rev' }, rework: { maxRounds: 0 } }] }));
+  completeWrite(off); returnGate(off, 'fix');
+  assert.deepEqual(off.runtime.reworkDue('t'), [], 'explicit 0 disables auto rework');
+  const human = coreFixture(bare({ kind: 'human' }));
+  completeWrite(human); returnGate(human, 'please fix');
+  assert.equal(human.runtime.reworkDue('t').length, 1, 'human return reworks by default');
+  assert.equal(human.runtime.reworkDue('t')[0].autoRound, false);
+});
+
+test('P-75: a Node may reuse its own previous Session sequentially; sessionOwner resolves the latest Attempt', () => {
+  const f = coreFixture(reworkPlan({ kind: 'agent', nodeId: 'rev' }, 2));
+  const first = f.runtime.claimNode('t', 'write');
+  first.attachSession('s-write'); first.complete('v1');
+  assert.equal(f.core.sessionOwner('s-write').attemptId, first.attemptId);
+  returnGate(f, 'fix');
+  f.runtime.applyRework('t', 'quality');
+  const second = f.runtime.claimNode('t', 'write');
+  second.attachSession('s-write');
+  assert.equal(f.core.sessionOwner('s-write').attemptId, second.attemptId, 'owner follows the current round');
+  assert.equal(f.read().execution.nodes.write.attempts.length, 2);
+  second.complete('v2');
+  // cross-node reuse stays rejected
+  const rev = f.runtime.claimNode('t', 'rev');
+  assert.throws(() => rev.attachSession('s-write'), e => e.code === 'session-conflict');
 });
 
 test('rework respects stop requests and human override', () => {
@@ -470,7 +510,9 @@ test('Service requireEvidence gate blocks Agent review pass without completion; 
   f.sessions.set(reviewSession, { status: 'completed', output: { finalText: JSON.stringify({ decision: 'passed', evidence: 'ok' }) } });
   await f.service.tick();
   const ticket = await f.service.read('w', 't');
-  assert.equal(ticket.execution.gates.quality.status, 'returned', 'requireEvidence forces returned without completion');
+  const returnedCycle = ticket.execution.gates.quality.history.find(h => h.reviews.some(r => r.decision === 'returned'));
+  assert.ok(returnedCycle, 'requireEvidence forces returned without completion');
+  assert.equal(ticket.execution.gates.quality.autoReworkRounds, 1, 'P-74 default rework opens the next cycle');
 });
 
 test('Service pre-approved rework dispatches a new Attempt carrying findings; budget exhaustion escalates once', async t => {
@@ -489,12 +531,14 @@ test('Service pre-approved rework dispatches a new Attempt carrying findings; bu
   assert.equal(ticket.execution.gates.quality.autoReworkRounds, 1);
   assert.equal(ticket.execution.nodes.write.attempts.length, 2, 'rework opened a new Attempt');
   const newWriteSession = ticket.execution.nodes.write.attempts.at(-1).sessionId;
-  const reworkPrompt = f.calls.submit.find(c => c.sessionId === newWriteSession).prompt;
+  assert.equal(newWriteSession, writeSession, 'P-75: rework reuses the previous Node Session');
+  const reworkPrompt = f.calls.submit.find(c => c.sessionId === newWriteSession && c.prompt.includes('missing sources')).prompt;
   assert.ok(reworkPrompt.includes('missing sources'), 'findings reach the rework dispatch prompt');
   // complete again, return again -> budget exhausted, no new attempt, escalation recorded once
   f.sessions.set(newWriteSession, { status: 'completed', output: 'v2' });
   await f.service.tick();
   const reviewSession2 = (await f.service.read('w', 't')).execution.gates.quality.dispatch.sessionId;
+  assert.equal(reviewSession2, reviewSession, 'P-75: re-review reuses the previous review Session');
   f.sessions.set(reviewSession2, { status: 'completed', output: { finalText: JSON.stringify({ decision: 'returned', evidence: 'still wrong' }) } });
   await f.service.tick(); await f.service.tick();
   ticket = await f.service.read('w', 't');
@@ -522,4 +566,43 @@ test('downstream dispatch context carries upstream summary, handoff, artifact ve
   assert.ok(shipPrompt.includes('ship reads the sealed report'), 'handoff object propagates');
   assert.ok(/"artifacts":\[\{"artifactId":"a-/.test(shipPrompt), 'sealed artifact versions propagate');
   assert.ok(shipPrompt.includes('Read it first'), 'downstream is instructed to read the handle file');
+});
+
+const reusePlan = (gateExtra = {}) => normalizePlan({ goal: 'g', deliverables: [], agents: { writer: { profile: { instructions: 'write' } }, rev: { profile: { instructions: 'review' } } }, nodes: [{ id: 'write', agentId: 'writer', dependsOn: [], task: { prompt: 'write' } }, { id: 'rev', agentId: 'rev', dependsOn: [], task: { prompt: 'review' } }], gates: [{ id: 'quality', from: ['write'], to: [], reviewer: { kind: 'agent', nodeId: 'rev' }, ...gateExtra }] });
+
+test('P-75: reworkSession "new" opens a fresh Session instead of reusing', async t => {
+  const f = await serviceFixture(t, reusePlan({ rework: { reworkSession: 'new' } }));
+  await f.service.saveDraftTicket('w', { id: 't', sessionId: 'origin', plan: reusePlan({ rework: { reworkSession: 'new' } }) });
+  await f.service.human('w', 'human', 'start', ['t']);
+  await f.service.tick();
+  const writeSession = (await f.service.read('w', 't')).execution.nodes.write.attempts.at(-1).sessionId;
+  f.sessions.set(writeSession, { status: 'completed', output: 'v1' });
+  await f.service.tick();
+  const reviewSession = (await f.service.read('w', 't')).execution.gates.quality.dispatch.sessionId;
+  f.sessions.set(reviewSession, { status: 'completed', output: { finalText: JSON.stringify({ decision: 'returned', evidence: 'fix it' }) } });
+  await f.service.tick();
+  const ticket = await f.service.read('w', 't');
+  assert.equal(ticket.execution.nodes.write.attempts.length, 2);
+  assert.notEqual(ticket.execution.nodes.write.attempts.at(-1).sessionId, writeSession, 'explicit "new" keeps the old Session untouched');
+});
+
+test('P-75: an unusable previous Session falls back to a new Session and the rework still dispatches', async t => {
+  const plan = reusePlan();
+  const f = await serviceFixture(t, plan);
+  await f.service.saveDraftTicket('w', { id: 't', sessionId: 'origin', plan });
+  await f.service.human('w', 'human', 'start', ['t']);
+  await f.service.tick();
+  const writeSession = (await f.service.read('w', 't')).execution.nodes.write.attempts.at(-1).sessionId;
+  f.sessions.set(writeSession, { status: 'completed', output: 'v1' });
+  await f.service.tick();
+  const reviewSession = (await f.service.read('w', 't')).execution.gates.quality.dispatch.sessionId;
+  f.sessions.set(reviewSession, { status: 'completed', output: { finalText: JSON.stringify({ decision: 'returned', evidence: 'fix it' }) } });
+  // the old write Session is gone from the Host: only its probe reports an error
+  f.hooks.inspect = async r => r.sessionId === writeSession ? { status: 'unknown', error: 'session gone' } : undefined;
+  await f.service.tick();
+  const ticket = await f.service.read('w', 't');
+  assert.equal(ticket.execution.nodes.write.attempts.length, 2, 'rework still opens a new Attempt');
+  const fresh = ticket.execution.nodes.write.attempts.at(-1).sessionId;
+  assert.notEqual(fresh, writeSession, 'fallback creates a new Session');
+  assert.ok(f.calls.submit.some(c => c.sessionId === fresh && c.prompt.includes('fix it')), 'findings reach the fallback dispatch');
 });

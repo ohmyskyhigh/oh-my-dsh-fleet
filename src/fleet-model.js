@@ -289,7 +289,7 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
     const p = `gates[${index}]`;
     if (!record(gate) || !identity(gate.id)) { add(p, 'Invalid Gate identity.'); continue; }
     const gateFields = ['id', 'from', 'to', 'reviewer', 'requireEvidence', 'rework'];
-    if (gate.reviewer?.kind === 'agent') gateFields.push('reviewTask', 'modelSelection', 'plannedCapabilities');
+    if (gate.reviewer?.kind === 'agent') gateFields.push('reviewTask', 'modelSelection', 'plannedCapabilities', 'reviewSession');
     if (Object.keys(gate).some(key => !gateFields.includes(key))) add(p, 'Unexpected Gate field (reviewTask, modelSelection and plannedCapabilities are only allowed when reviewer.kind is "agent").');
     if (gate.reviewTask !== undefined) validateReviewTask(gate.reviewTask, `${p}.reviewTask`, add);
     if (gate.modelSelection !== undefined) validateModelSelection(gate.modelSelection, `${p}.modelSelection`, add);
@@ -299,14 +299,16 @@ export function validatePlan(plan, { mode = 'save' } = {}) {
     if (!record(gate.reviewer) || !['human', 'agent'].includes(gate.reviewer.kind) || (gate.reviewer.kind === 'agent' && !identity(gate.reviewer.nodeId))) add(`${p}.reviewer`, 'Gate needs a human or Node reviewer.');
     else if (Object.keys(gate.reviewer).some(key => !(gate.reviewer.kind === 'human' ? ['kind'] : ['kind', 'nodeId']).includes(key))) add(`${p}.reviewer`, 'Unexpected Gate reviewer field.');
     if (gate.requireEvidence !== undefined && typeof gate.requireEvidence !== 'boolean') add(`${p}.requireEvidence`, 'requireEvidence must be a boolean.');
+    if (gate.reviewSession !== undefined && !['reuse', 'new'].includes(gate.reviewSession)) add(`${p}.reviewSession`, 'reviewSession must be "reuse" or "new".');
     if (gate.rework !== undefined) {
       const r = gate.rework, rp = `${p}.rework`;
       if (!record(r)) add(rp, 'rework must be an object.');
       else {
-        if (Object.keys(r).some(key => !['maxRounds', 'targetNodes', 'scopeNote'].includes(key))) add(rp, 'Unexpected Gate rework field.');
-        if (!Number.isSafeInteger(r.maxRounds) || r.maxRounds < 0) add(`${rp}.maxRounds`, 'rework.maxRounds must be a safe integer >= 0.');
+        if (Object.keys(r).some(key => !['maxRounds', 'targetNodes', 'scopeNote', 'reworkSession'].includes(key))) add(rp, 'Unexpected Gate rework field.');
+        if (r.maxRounds !== undefined && (!Number.isSafeInteger(r.maxRounds) || r.maxRounds < 0)) add(`${rp}.maxRounds`, 'rework.maxRounds must be a safe integer >= 0.');
         if (r.targetNodes !== undefined && (!Array.isArray(r.targetNodes) || !r.targetNodes.every(identity) || new Set(r.targetNodes).size !== r.targetNodes.length)) add(`${rp}.targetNodes`, 'rework.targetNodes must be unique Node IDs.');
         if (r.scopeNote !== undefined && typeof r.scopeNote !== 'string') add(`${rp}.scopeNote`, 'rework.scopeNote must be text.');
+        if (r.reworkSession !== undefined && !['reuse', 'new'].includes(r.reworkSession)) add(`${rp}.reworkSession`, 'rework.reworkSession must be "reuse" or "new".');
       }
     }
   }
@@ -372,6 +374,29 @@ export function graphLevels(nodes = [], gates = [], logicGates = []) {
   return levels;
 }
 
+/** P-72／P-73: value-copy a saved plan into reusable orchestration template content.
+ * Concrete Ticket/series references (ticketDependencies/ticketDependencySeries) are stripped;
+ * agentMapping decides each node's agentId: link → Root template ID, save → new Agent template ID,
+ * leave/unmapped → null (assigned at instantiation). logicGates and defaults are copied by value.
+ * Core validates before writing; the Client uses the same rules for the save preview. */
+export function orchestrationContentFromPlan(plan, agentMapping = {}) {
+  const nodes = (Array.isArray(plan?.nodes) ? plan.nodes : []).map(node => {
+    const { ticketDependencies, ticketDependencySeries, ...rest } = node;
+    const mapping = node.agentId == null ? null : agentMapping?.[node.agentId];
+    const agentId = node.agentId == null ? null
+      : mapping?.mode === 'link' ? mapping.templateId ?? null
+      : mapping?.mode === 'save' ? mapping.id ?? null
+      : null;
+    return { ...clone(rest), agentId };
+  });
+  const content = { nodes, gates: clone(Array.isArray(plan?.gates) ? plan.gates : []) };
+  if (plan?.logicGates !== undefined) content.logicGates = clone(plan.logicGates);
+  const defaults = {};
+  for (const key of ['goal', 'inputs', 'deliverables', 'criteria', 'requirements']) if (plan?.[key] !== undefined) defaults[key] = clone(plan[key]);
+  if (Object.keys(defaults).length) content.defaults = defaults;
+  return content;
+}
+
 export function projectTemplate(template) {
   const t = clone(template);
   return t.kind === 'agent' ? { ...t, profile: clone(t.content.profile), sourceId: t.source?.templateId ?? null, history: t.history.map(h => ({ ...h, profile: h.content?.profile ?? h.profile })) }
@@ -426,7 +451,13 @@ export function projectTicket(ticket, { configRevision = ticket?.execution?.curr
   const gates = (Array.isArray(validPlan.gates) ? validPlan.gates : []).map(g => {
     const merged = { ...clone(g), ...(t.execution?.gates?.[g.id] ?? { status: 'pending', reviews: [], humanOverride: null, history: [] }), id: g.id };
     merged.coverage = gateCoverage(merged, artifacts, nodes);
-    merged.rework = { enabled: Boolean(g.rework && g.rework.maxRounds > 0), maxRounds: g.rework?.maxRounds ?? 0, autoReworkRounds: merged.autoReworkRounds ?? 0, unlimited: g.reviewer?.kind === 'human', ...(g.rework?.scopeNote !== undefined ? { scopeNote: g.rework.scopeNote } : {}) };
+    // P-74/P-75: rework is on by default. Agent gates cap at maxRounds (default 3, explicit 0 disables);
+    // human gates rework on every return unless explicitly disabled with 0. Session reuse defaults to "reuse".
+    const isAgentGate = g.reviewer?.kind === 'agent';
+    const declaredRounds = g.rework?.maxRounds;
+    const effectiveRounds = declaredRounds ?? (isAgentGate ? 3 : 0);
+    merged.rework = { enabled: isAgentGate ? effectiveRounds > 0 : declaredRounds !== 0, maxRounds: effectiveRounds, autoReworkRounds: merged.autoReworkRounds ?? 0, unlimited: !isAgentGate, reworkSession: g.rework?.reworkSession ?? 'reuse', ...(g.rework?.scopeNote !== undefined ? { scopeNote: g.rework.scopeNote } : {}) };
+    merged.reviewSession = g.reviewSession ?? 'reuse';
     return merged;
   });
   const current = isCurrentPlan(t.plan) ? t.plan : t.plan?.ticket ?? t.plan ?? {};

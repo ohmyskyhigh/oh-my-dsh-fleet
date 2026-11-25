@@ -211,7 +211,7 @@ export function createFleetPlugin(require) {
         finally{creatingTicket=false;view.busy=false;notifyViews();}
       }
       // P-69 Root overview cache: read-only, one aggregated request; each project reports its own state.
-      let overview={ready:false,pending:false,error:null,projects:[],series:[],scheduleStatus:null};
+      let overview={ready:false,pending:false,error:null,pluginVersion:null,projects:[],series:[],admin:null,scheduleStatus:null};
       let overviewUi={tab:'attention',showHidden:false};
       const setOverviewUI=patch=>{overviewUi={...overviewUi,...patch};notifyViews();};
       async function requestOverview(){
@@ -222,7 +222,7 @@ export function createFleetPlugin(require) {
           if(!Array.isArray(body.projects))throw fleetResponseError('invalidWorkspaceResponse');
           const series=body.projects.flatMap(project=>(Array.isArray(project.series)?project.series:[]).map(item=>({...item,workspaceId:project.workspaceId,projectTitle:project.title||project.path?.split(/[\\/]/).filter(Boolean).pop()||project.workspaceId})));
           if(disposed)return;
-          overview={ready:true,pending:false,error:null,pluginVersion:body.pluginVersion,projects:body.projects,series,scheduleStatus:body.scheduleStatus??null};
+          overview={ready:true,pending:false,error:null,pluginVersion:body.pluginVersion,projects:body.projects,series,scheduleStatus:body.scheduleStatus??null,admin:body.admin??null};
         }catch(error){if(disposed)return;overview={...overview,pending:false,error:error?.message||String(error)};}
         notifyViews();
       }
@@ -252,7 +252,7 @@ export function createFleetPlugin(require) {
         const toggleWorkspace=async(wsId,enabled)=>{await requestModes({workspaceId:wsId,enabled});void requestOverview();};
         const actSeries=async(action,args,item)=>{if(!canManage(item.workspaceId))return null;const result=await act(item.workspaceId,action,args,t);void requestOverview();return result;};
         const openSeries=(dialog,item)=>{if(!canManage(item.workspaceId))return;selectWorkspace(item.workspaceId);setUI(item.workspaceId,{page:'schedules',scheduleId:item.id,error:null,notice:null,dialog,dialogError:null});};
-        return h('section',{className:'dsh-fleet-shell dsh-fleet-control','data-fleet-control':'',lang:locale.language==='zh'?'zh-CN':'en','aria-labelledby':'fleet-control-title'},h('style',null,fleetStyles),views.renderRootOverview({t,...locale,workspaces,ui:overviewUi,setUI:setOverviewUI,setLanguagePreference:languageStore.setPreference,pluginVersion:overview.pluginVersion,projects:overview.projects,series:overview.series,scheduleStatus:overview.scheduleStatus,pending:overview.pending||state.pending,error:overview.error||localizeError(mode,t).error,notice:state.notice?t('saved'):null,mode:localizeError(mode,t),refresh:()=>{void requestModes();void requestOverview();},openTicket,openWorkspace:selectWorkspace,toggleWorkspace,actSeries,openSeries,returnToConversation:()=>ctx.layout.selectPanel(null)}));
+        return h('section',{className:'dsh-fleet-shell dsh-fleet-control','data-fleet-control':'',lang:locale.language==='zh'?'zh-CN':'en','aria-labelledby':'fleet-control-title'},h('style',null,fleetStyles),views.renderRootOverview({t,...locale,workspaces,ui:overviewUi,setUI:setOverviewUI,setLanguagePreference:languageStore.setPreference,pluginVersion:overview.pluginVersion,projects:overview.projects,series:overview.series,admin:overview.admin,scheduleStatus:overview.scheduleStatus,pending:overview.pending||state.pending,error:overview.error||localizeError(mode,t).error,notice:state.notice?t('saved'):null,mode:localizeError(mode,t),refresh:()=>{void requestModes();void requestOverview();},openTicket,openWorkspace:selectWorkspace,toggleWorkspace,actSeries,openSeries,returnToConversation:()=>ctx.layout.selectPanel(null)}));
       }
       function FleetPanel({useFleetLanguage,useFleetWorkspace,useFleetModes,useFleetViews,useFleetWorkspaces,useFleetSessions}) {
         const locale=useFleetLanguage(value=>value),t=fleetTranslator(locale.language);

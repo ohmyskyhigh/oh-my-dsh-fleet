@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
-import { FleetCore, FleetCoreError, migrateState, defaultSettings, nativeProgressRow, assertStart } from './fleet-core.js';
+import { FleetCore, FleetCoreError, migrateState, defaultSettings, normalizeSettings, nativeProgressRow, assertStart } from './fleet-core.js';
 import { projectTicket, projectTemplate, effectiveModelSelection, effectiveGateModelSelection, readableTitle, seriesRecurrence, validatePlan } from './fleet-model.js';
 import { FleetStore, jsonClone, ticketFilename } from './fleet-store.js';
 
@@ -57,8 +57,9 @@ const claimSelection = input => input?.modelSelection ?? input?.profile?.profile
 /** One Root settings/Templates chain and one independent chain per Workspace.
  * Business mutations read their target's latest state under its Store lock and
  * publish that chain alone. Root settings are read as a complete committed version;
- * no transaction claims atomicity across different directories. */
-class FleetPersistence {
+ * no transaction claims atomicity across different directories.
+ * Exported so regression tests can assert the load/fromState round-trip directly. */
+export class FleetPersistence {
   #templates; #workspaces = new Map(); #paths = {}; #hook; #closed = false;
   constructor(templates, hook) { this.#templates = templates; this.#hook = hook; }
   static async open({ rootPath, workspacePaths = {}, beforePublish } = {}) {
@@ -165,7 +166,10 @@ class FleetPersistence {
       if (slice.schemaVersion === 2) { const { schemaVersion, ...workspace } = slice; workspaces.push(workspace); }
       else workspaces.push(migrateState({ schemaVersion: 1, agents: root?.agents ?? rootState.templates.filter(t => t.kind === 'agent').map(t => ({ ...projectTemplate(t), id: t.legacy?.original?.id ?? t.id })), flows: root?.flows ?? rootState.templates.filter(t => t.kind === 'orchestration').map(t => ({ ...projectTemplate(t), id: t.legacy?.original?.id ?? t.id })), workspaces: [slice] }).workspaces[0]);
     }
-    return { schemaVersion: 2, templates: rootState.templates, settings: rootState.settings ?? defaultSettings(), workspaces };
+    // Symmetric with FleetCore.fromState → exportState: settings read from an older
+    // (pre-P-77) Root chain are normalized on load, so the chain-boundary guard does
+    // not mistake a purely additive normalization for a cross-chain mutation.
+    return { schemaVersion: 2, templates: rootState.templates, settings: normalizeSettings(rootState.settings ?? defaultSettings()), workspaces };
   }
   async transact(scope, action) {
     const store = scope === null ? this.#templates : this.#workspaces.get(scope);
@@ -226,7 +230,7 @@ export class FleetService {
       const { result, state } = await this.#store.transact(scope, fn);
       this.#core = FleetCore.fromState(state); return result;
     } catch (error) {
-      if (!error.code || !['store-busy', 'invalid-input', 'unsupported-contract', 'legacy-plan', 'stale-revision', 'control-locked', 'ticket-referenced', 'unknown-ticket', 'unknown-series', 'scope-required', 'dependency-wait', 'unknown-workspace', 'unknown-node', 'unknown-gate', 'unknown-agent', 'unknown-flow', 'state-conflict', 'not-running', 'not-runnable', 'stale-attempt', 'stale-dispatch', 'not-reviewable', 'invalid-flow', 'incomplete-plan', 'unsupported-profile', 'completed-work-conflict', 'repair-required', 'duplicate-id', 'draft-scope', 'session-conflict', 'evidence-required', 'session-scope'].includes(error.code)) this.#fault = `Fleet persistence failed; dispatch paused: ${errorText(error)}`;
+      if (!error.code || !['store-busy', 'invalid-input', 'unsupported-contract', 'legacy-plan', 'stale-revision', 'control-locked', 'ticket-referenced', 'unknown-ticket', 'unknown-series', 'scope-required', 'dependency-wait', 'unknown-workspace', 'unknown-node', 'unknown-gate', 'unknown-agent', 'unknown-flow', 'state-conflict', 'not-running', 'not-runnable', 'stale-attempt', 'stale-dispatch', 'not-reviewable', 'invalid-flow', 'incomplete-plan', 'unsupported-profile', 'completed-work-conflict', 'repair-required', 'duplicate-id', 'draft-scope', 'session-conflict', 'evidence-required', 'session-scope', 'admin-required', 'unknown-admin'].includes(error.code)) this.#fault = `Fleet persistence failed; dispatch paused: ${errorText(error)}`;
       throw error;
     }
   }
@@ -461,7 +465,7 @@ export class FleetService {
   modelCatalog() { return this.#enqueue(() => this.#adapter.modelCatalog(), true); }
   /** Caller identity must be obtained from the authenticated user path, not tool arguments. */
   human(workspaceId, userId, action, args = []) {
-    const allowed = new Set(['start', 'stop', 'resume', 'retryNode', 'enableDependencies', 'disableDependencies', 'commentNode', 'changeNode', 'setPendingNodeModel', 'forcePassGate', 'reviewGate', 'deliverOverride', 'deleteDraftTicket', 'abandonTicket', 'unabandonTicket', 'replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'instantiateTemplate', 'repairTicket', 'regenerateTicket']);
+    const allowed = new Set(['start', 'stop', 'resume', 'retryNode', 'enableDependencies', 'disableDependencies', 'commentNode', 'changeNode', 'setPendingNodeModel', 'forcePassGate', 'reviewGate', 'deliverOverride', 'deleteDraftTicket', 'abandonTicket', 'unabandonTicket', 'replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'saveTemplateFromTicket', 'instantiateTemplate', 'repairTicket', 'regenerateTicket', 'grantAdmin', 'revokeAdmin']);
     try { args = jsonClone(args); } catch (e) { return Promise.reject(new FleetCoreError('invalid-input', e.message)); }
     return this.#enqueue(async () => {
       guard(allowed.has(action), 'unknown-action', 'Unknown human Fleet action.');
@@ -480,7 +484,25 @@ export class FleetService {
           this.#assertSelectionsAvailable([selection], catalog);
         }
       }
-      return this.#commit(['replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate'].includes(action) ? null : workspaceId, core => core.human(workspaceId, userId)[action](...args));
+      // P-72／P-73: template saves publish only Root (Agent templates first, orchestration last, one
+      // transaction). The source Ticket is not in that write set; afterwards a separate Workspace
+      // commit appends one templates-saved activity without changing plan, revision or sourceRefs.
+      if (action === 'saveTemplateFromTicket' || (action === 'saveTemplate' && args[0]?.source?.ticketId !== undefined)) {
+        const result = await this.#commit(null, core => core.human(workspaceId, userId)[action](...args));
+        const fromTicket = action === 'saveTemplateFromTicket';
+        const ticketId = fromTicket ? args[0].ticketId : args[0].source.ticketId;
+        const ticketRevision = fromTicket ? result.ticketRevision : args[0].source.ticketRevision;
+        const templates = fromTicket
+          ? [{ kind: 'orchestration', id: result.template.id, revision: result.template.revision }, ...result.agentTemplates.map(t => ({ kind: 'agent', id: t.id, revision: t.revision }))]
+          : [{ kind: args[0].kind, id: result.id, revision: result.revision }];
+        try {
+          await this.#commit(workspaceId, core => core.recordTemplatesSaved(workspaceId, ticketId, { ticketRevision, templates }, { kind: 'human', userId }));
+        } catch (error) {
+          throw new FleetCoreError(error.code ?? 'state-conflict', `Templates were saved to Root, but the Ticket activity could not be recorded: ${error.message}`);
+        }
+        return result;
+      }
+      return this.#commit(['replaceRootAgent', 'replaceRootOrchestration', 'replaceGlobalSettings', 'saveTemplate', 'saveTemplateFromTicket', 'grantAdmin', 'revokeAdmin'].includes(action) ? null : workspaceId, core => core.human(workspaceId, userId)[action](...args));
     });
   }
   /** P-51: the Agent executes a start/resume decision the user explicitly requested in this conversation. */
@@ -493,6 +515,90 @@ export class FleetService {
       await this.#checkStartSelections(workspaceId, ticketId);
       const resume = ticket.status === 'stopped';
       return this.#commit(workspaceId, core => resume ? core.agent(workspaceId, sessionId).resume(ticketId) : core.agent(workspaceId, sessionId).start(ticketId));
+    });
+  }
+  /** P-77: grantable Admin surface — the caller Workspace must be granted and the target in scope. */
+  #requireAdmin(callerWs, targetWs) {
+    guard(this.#core.adminGranted(callerWs), 'admin-required', 'This Workspace is not an Admin.');
+    if (targetWs !== undefined) guard(this.#core.adminCan(callerWs, targetWs), 'admin-required', 'The target Workspace is outside this Admin scope.');
+  }
+  adminStatus(workspaceId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      return { workspaceId, granted: this.#core.adminGranted(workspaceId), admin: this.#core.adminConfig() };
+    }, true);
+  }
+  adminTickets(callerWs) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs);
+      return this.#core.listWorkspaces().filter(id => this.#core.adminCan(callerWs, id)).map(id => ({ workspaceId: id, tickets: this.#core.listTickets(id).map(t => projectTicket(t)) }));
+    }, true);
+  }
+  adminTicket(callerWs, targetWs, ticketId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs, targetWs);
+      const ticket = this.#core.readTicket(targetWs, ticketId);
+      guard(ticket, 'unknown-ticket', 'No Ticket with this ID belongs to the target Workspace.');
+      return projectTicket(ticket);
+    }, true);
+  }
+  adminTemplates(callerWs) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs);
+      return this.#core.listTemplates();
+    }, true);
+  }
+  adminSaveTemplate(callerWs, sessionId, input) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs);
+      const entry = this.#core.adminConfig().workspaces.find(e => e.workspaceId === callerWs);
+      return this.#commit(null, core => core.adminAgent(callerWs, sessionId, entry.scope).saveTemplate(input));
+    });
+  }
+  adminSavePlan(callerWs, sessionId, targetWs, input) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs, targetWs);
+      return this.#commit(targetWs, core => core.adminAgent(targetWs, sessionId, targetWs).savePlan(input.ticketId, { expectedRevision: input.expectedRevision, plan: input.plan, sessionId: input.sessionId }));
+    });
+  }
+  adminStart(callerWs, sessionId, targetWs, ticketId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs, targetWs);
+      await this.#checkStartSelections(targetWs, ticketId);
+      return this.#commit(targetWs, core => core.agent(targetWs, sessionId).start(ticketId));
+    });
+  }
+  adminStop(callerWs, sessionId, targetWs, ticketId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs, targetWs);
+      return this.#commit(targetWs, core => core.agent(targetWs, sessionId).stop(ticketId));
+    });
+  }
+  adminGrant(workspaceId, userId, scope) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      return this.#commit(null, core => core.human(workspaceId, userId).grantAdmin(scope));
+    });
+  }
+  adminRevoke(workspaceId, userId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      return this.#commit(null, core => core.human(workspaceId, userId).revokeAdmin());
+    });
+  }
+  agentStop(workspaceId, sessionId, ticketId) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      const ticket = this.#core.readTicket(workspaceId, ticketId);
+      guard(ticket, 'unknown-ticket', 'No Ticket with this ID belongs to this Workspace.');
+      return this.#commit(workspaceId, core => core.agent(workspaceId, sessionId).stop(ticketId));
     });
   }
   async #checkStartSelections(workspaceId, input, retryRead = false) {
@@ -768,8 +874,19 @@ export class FleetService {
       'When the work is done, call the fleet_submit tool to submit structured completion evidence: artifacts:[{path (Workspace-relative), deliverableIndex? (into the frozen deliverables), mediaType?}], acceptanceResults:[{criterion?, status:"passed"|"failed"|"unknown", evidence?}], verification:[{command, exitCode?, output?, source:"agent-report"}], summary?. Each submission seals a new artifact version; submit again after fixing findings. Evidence is self-reported (agent-report); it does not approve Gates or finish the Ticket.'
     ].join('\n\n');
   }
+  /** P-75: a previous Session is reusable only while the Host can still resolve and read it. */
+  async #sessionUsable(ws, sessionId, requestId) {
+    try {
+      await this.#adapter.recover?.({ workspaceId: ws, sessionId });
+      const observed = await this.#adapter.inspect({ sessionId, requestId });
+      return !(observed.status === 'unknown' && observed.error);
+    } catch { return false; }
+  }
   async #startNode(ws, ticketId, nodeId) {
     const deliveredIds = this.#ticket(ws, ticketId).nodes.find(n => n.id === nodeId).thread.filter(r => r.actor.kind === 'human').map(r => r.id);
+    const priorAttempt = this.#ticket(ws, ticketId).nodes.find(n => n.id === nodeId).attempts.at(-1) ?? null;
+    const lastRetry = [...(this.#ticket(ws, ticketId).nodes.find(n => n.id === nodeId).thread ?? [])].reverse().find(r => r.intent === 'retry');
+    const isGateRework = Boolean(lastRetry?.text?.includes('pre-approved rework'));
     const claim = await this.#commit(ws, c => {
       const worker = c.runtime(ws).claimNode(ticketId, nodeId);
       // P-50: effective selection = node override ?? agent profile; recorded as a dispatch fact.
@@ -785,6 +902,29 @@ export class FleetService {
     const who = t0.plan.agents?.[nd0.agentId]?.name || nd0.role || nd0.agentId || nodeId;
     const base = String(t0.plan.title || readableTitle(t0.plan.goal) || ticketId).trim().slice(0, 24);
     const sessionTitle = `${base} · ${who}（${nodeId}）· 第${round}轮`;
+    // P-75: rework/retry reuses this Node's previous Session by default (same conversation, new round),
+    // unless a Gate declares reworkSession:"new" or the old Session is no longer usable.
+    const newOnly = (t0.snapshot?.gates ?? []).some(g => (g.from ?? []).includes(nodeId) && g.rework?.reworkSession === 'new');
+    if (isGateRework && !newOnly && priorAttempt?.sessionId && priorAttempt.status !== 'running'
+      && await this.#sessionUsable(ws, priorAttempt.sessionId, priorAttempt.dispatch?.messageId ?? `fleet-${priorAttempt.id}`)) {
+      const sessionId = priorAttempt.sessionId;
+      try {
+        await this.#commit(ws, c => {
+          const worker = this.#worker(c, ws, ticketId, nodeId, attemptId); worker.attachSession(sessionId);
+          return worker.recordDispatch({ messageId: requestId, phase: 'submit-intent', owner: this.#owner, detail: { ...detail, reusedSession: true } });
+        });
+        await this.#refresh();
+        const reusedTicket = this.#ticket(ws, ticketId), reusedNode = reusedTicket.nodes.find(n => n.id === nodeId);
+        if (reusedTicket.status !== 'running') { if (reusedTicket.status === 'stop-requested') await this.#stopNode(ws, ticketId, reusedNode, reusedNode.attempts.at(-1), true); return; }
+        await this.#adapter.submit({ workspaceId: ws, sessionId, requestId, prompt: this.#prompt(reusedTicket, reusedNode) });
+        await this.#commit(ws, c => this.#worker(c, ws, ticketId, nodeId, attemptId).recordDispatch({ messageId: requestId, phase: 'submitted', detail: { ...detail, reusedSession: true } }));
+        return;
+      } catch (error) {
+        if (this.#fault) throw error;
+        await this.#commit(ws, c => this.#worker(c, ws, ticketId, nodeId, attemptId).recordDispatch({ messageId: requestId, phase: 'uncertain', detail: { ...detail, reusedSession: true, error: errorText(error) } }));
+        return;
+      }
+    }
     let sessionId;
     try {
       ({ sessionId } = await this.#adapter.create({ workspaceId: ws, profile: claim.input.profile.profile, requestId, title: sessionTitle, ...(claim.modelSelection ? { modelSelection: claim.modelSelection } : {}) }));
@@ -896,7 +1036,7 @@ export class FleetService {
       const frozenGate = ticket.snapshot.gates.find(g => g.id === gateId);
       const node = ticket.nodes.find(n => n.id === gate.reviewer.nodeId);
       const agent = ticket.snapshot.agents[node.agentId];
-      const detail = { modelSelection: effectiveGateModelSelection(frozenGate, node, agent).selection };
+      const detail = { modelSelection: effectiveGateModelSelection(frozenGate, node, agent).selection, reviewerNodeId: gate.reviewer.nodeId };
       c.runtime(ws).recordGateDispatch(ticketId, gateId, { requestId, messageId: requestId, phase: 'created', owner: this.#owner, detail }, null);
       return { ticket, gate, frozenGate, node, agent, detail };
     });
@@ -904,10 +1044,22 @@ export class FleetService {
     const gBase = String(ticket.snapshot.title || readableTitle(ticket.snapshot.goal) || ticketId).trim().slice(0, 24);
     const gWho = agent.name || gate.reviewer.nodeId || 'review';
     const gTitle = `${gBase} · 审核 ${gate.id}（${gWho}）· 第${(gate.cycle ?? 0) + 1}轮`;
+    // P-75: re-review reuses the previous review Session when the reviewer Node is unchanged and the
+    // Session is still usable, so the reviewer keeps its earlier findings in context.
+    const priorCycle = (gate.history ?? []).at(-1) ?? null;
+    const priorReview = priorCycle?.dispatch ?? null;
+    const reuseReview = priorCycle?.reason?.includes('pre-approved rework') && frozenGate.reviewSession !== 'new' && priorReview?.sessionId
+      && priorReview.detail?.reviewerNodeId === gate.reviewer.nodeId
+      && await this.#sessionUsable(ws, priorReview.sessionId, priorReview.messageId);
     let sessionId;
     try {
-      ({ sessionId } = await this.#adapter.create({ workspaceId: ws, profile: agent.profile, requestId, title: gTitle, ...(modelSelection ? { modelSelection } : {}) }));
-      await this.#commit(ws, c => c.runtime(ws).recordGateDispatch(ticketId, gate.id, { sessionId, messageId: requestId, phase: 'submit-intent', owner: this.#owner, detail }, requestId));
+      if (reuseReview) {
+        sessionId = priorReview.sessionId;
+        await this.#commit(ws, c => c.runtime(ws).recordGateDispatch(ticketId, gate.id, { sessionId, messageId: requestId, phase: 'submit-intent', owner: this.#owner, detail: { ...detail, reusedSession: true } }, requestId));
+      } else {
+        ({ sessionId } = await this.#adapter.create({ workspaceId: ws, profile: agent.profile, requestId, title: gTitle, ...(modelSelection ? { modelSelection } : {}) }));
+        await this.#commit(ws, c => c.runtime(ws).recordGateDispatch(ticketId, gate.id, { sessionId, messageId: requestId, phase: 'submit-intent', owner: this.#owner, detail }, requestId));
+      }
       if (this.#ticket(ws, ticketId).status !== 'running') { const cancelled = await this.#adapter.cancel({ sessionId }); await this.#commit(ws, c => c.runtime(ws).recordGateDispatch(ticketId, gate.id, { sessionId, messageId: requestId, phase: cancelled?.stopped ? 'stopped' : 'uncertain', detail }, requestId)); return; }
       const capabilities = frozenGate.plannedCapabilities ?? node.task?.plannedCapabilities ?? [];
       const reviewTask = frozenGate.reviewTask;

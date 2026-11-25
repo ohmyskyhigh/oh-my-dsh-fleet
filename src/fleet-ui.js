@@ -1,4 +1,4 @@
-import { projectTicket, validatePlan, graphLevels, isIncompatibleDraft, readableTitle, stagePlanView, effectiveSeriesTiming, isUtcInstant, seriesRecurrence, seriesScheduledAt } from './fleet-model.js';
+import { projectTicket, validatePlan, graphLevels, isIncompatibleDraft, isCurrentPlan, readableTitle, stagePlanView, effectiveSeriesTiming, isUtcInstant, seriesRecurrence, seriesScheduledAt, orchestrationContentFromPlan } from './fleet-model.js';
 
 import { TICKET_STATUSES } from './fleet-model.js';
 
@@ -78,11 +78,12 @@ export function applyGatePolicy(plan, gateId, { requireEvidence, rework }) {
   if (!gate) throw new Error(`Unknown gate: ${gateId}`);
   if (requireEvidence) gate.requireEvidence = true; else delete gate.requireEvidence;
   if (rework) {
-    if (!Number.isSafeInteger(rework.maxRounds) || rework.maxRounds < 1) throw new Error('rework.maxRounds must be a positive integer');
+    if (!Number.isSafeInteger(rework.maxRounds) || rework.maxRounds < 0) throw new Error('rework.maxRounds must be a safe integer >= 0');
     const nodeIds = new Set((next.nodes ?? []).map(n => n.id));
     const targets = cleanList(rework.targetNodes);
     if (targets.some(id => !nodeIds.has(id))) throw new Error('rework.targetNodes must reference plan nodes');
-    gate.rework = { maxRounds: rework.maxRounds, ...(targets.length ? { targetNodes: targets } : {}), ...(typeof rework.scopeNote === 'string' && rework.scopeNote.trim() ? { scopeNote: rework.scopeNote.trim() } : {}) };
+    if (rework.reworkSession !== undefined && !['reuse', 'new'].includes(rework.reworkSession)) throw new Error('rework.reworkSession must be "reuse" or "new"');
+    gate.rework = { maxRounds: rework.maxRounds, ...(targets.length ? { targetNodes: targets } : {}), ...(typeof rework.scopeNote === 'string' && rework.scopeNote.trim() ? { scopeNote: rework.scopeNote.trim() } : {}), ...(rework.reworkSession === 'new' ? { reworkSession: 'new' } : {}) };
   } else delete gate.rework;
   return next;
 }
@@ -495,11 +496,15 @@ export function createFleetViews(React) {
   // 模板补齐表单：goal/inputs/deliverables/criteria/requirements＋逐节点 Agent 分配；预约模式附带时间规则。
   function TemplateTicketForm({L,flow,catalog,mode='instantiate',busy=false,error=null,unavailable=null,onSubmit,onCancel}) {
     const nodes=list(flow?.definition?.nodes),agents=list(catalog?.agents);
-    const [goal,setGoal]=React.useState('');
-    const [inputsText,setInputsText]=React.useState('');
-    const [deliverablesText,setDeliverablesText]=React.useState('');
-    const [criteriaText,setCriteriaText]=React.useState('');
-    const [requirements,setRequirements]=React.useState('');
+    // P-72: template defaults only prefill this form; they stay editable and never enter the plan implicitly.
+    const defaults=flow?.definition?.defaults??{};
+    const hasDefaults=Object.keys(defaults).length>0;
+    const defaultDeliverablesText=items=>!Array.isArray(items)?'':items.every(item=>typeof item==='string')?items.join('\n'):JSON.stringify(items,null,2);
+    const [goal,setGoal]=React.useState(typeof defaults.goal==='string'?defaults.goal:'');
+    const [inputsText,setInputsText]=React.useState(()=>defaults.inputs&&typeof defaults.inputs==='object'&&Object.keys(defaults.inputs).length?JSON.stringify(defaults.inputs,null,2):'');
+    const [deliverablesText,setDeliverablesText]=React.useState(()=>defaultDeliverablesText(defaults.deliverables));
+    const [criteriaText,setCriteriaText]=React.useState(()=>list(defaults.criteria).join('\n'));
+    const [requirements,setRequirements]=React.useState(typeof defaults.requirements==='string'?defaults.requirements:'');
     const [assignments,setAssignments]=React.useState(()=>Object.fromEntries(nodes.map(node=>[node.id,agents.some(a=>a.id===node.agentId)?node.agentId:''])));
     const [name,setName]=React.useState(`${flow?.name||flow?.id||''}`);
     const [timing,setTiming]=React.useState(()=>initialTimingState());
@@ -513,7 +518,12 @@ export function createFleetViews(React) {
       event.preventDefault();
       if(locked)return;
       if(!goal.trim()){setLocalError(L('请填写任务目标。','Please enter a goal.'));return;}
-      const deliverables=lines(deliverablesText);
+      let deliverables;
+      const trimmedDeliverables=deliverablesText.trim();
+      if(trimmedDeliverables.startsWith('[')){
+        try{deliverables=JSON.parse(trimmedDeliverables);}catch{setLocalError(L('交付物 JSON 格式有误。','Deliverables JSON is invalid.'));return;}
+        if(!Array.isArray(deliverables)){setLocalError(L('交付物须为 JSON 数组或每行一项。','Deliverables must be a JSON array or one item per line.'));return;}
+      }else deliverables=lines(deliverablesText);
       if(mode==='schedule'&&!deliverables.length){setLocalError(L('请至少填写一项交付物（每行一项）。','Add at least one deliverable (one per line).'));return;}
       let inputs={};
       if(inputsText.trim()){try{inputs=JSON.parse(inputsText);}catch{setLocalError(L('输入 JSON 格式有误。','Inputs JSON is invalid.'));return;}
@@ -539,11 +549,12 @@ export function createFleetViews(React) {
       h('div',{className:'fl-dialog-actions'},button(L('完成','Done'),onCancel,{className:'fl-btn fl-btn-primary','data-fleet-schedule-done':''})));
     return h('form',{onSubmit:submit,'data-fleet-instantiate-form':flow?.id||''},h('div',{className:'fl-stack'},
       unavailable&&h('p',{className:'fl-notice',role:'alert','data-fleet-schedule-unavailable':''},unavailable),
-      h('p',{className:'fl-help'},L('模板只含节点与关卡；补齐目标、输入、交付物与各节点 Agent 后按值复制为普通草稿（保留来源版本）。','The template holds nodes and gates only. Complete the goal, inputs, deliverables and per-node Agents; the result is a normal draft copied by value with source revisions retained.')),
+      h('p',{className:'fl-help'},L('模板含节点、关卡与可选默认值；默认值只预填本表单，可修改。补齐后按值复制为普通草稿（保留来源版本）。','The template holds nodes, gates and optional defaults. Defaults only prefill this form and stay editable; the result is a normal draft copied by value with source revisions retained.')),
+      hasDefaults&&h('p',{className:'fl-notice',role:'status','data-fleet-instantiate-defaults':''},L('已按模板默认值预填，可修改。','Prefilled from the template defaults; edit as needed.')),
       mode==='schedule'&&h('label',{className:'fl-field'},L('计划名称','Schedule name'),h('input',{value:name,disabled:locked,maxLength:120,required:true,'data-fleet-schedule-name':'',onChange:e=>setName(e.target.value)})),
       h('label',{className:'fl-field'},L('任务目标','Goal'),h('textarea',{value:goal,disabled:locked,rows:3,required:true,'data-fleet-instantiate-goal':'',onChange:e=>setGoal(e.target.value)})),
       h('label',{className:'fl-field'},L('输入（JSON 对象，可空）','Inputs (JSON object, optional)'),h('textarea',{value:inputsText,disabled:locked,rows:3,'data-fleet-instantiate-inputs':'',onChange:e=>setInputsText(e.target.value)})),
-      h('label',{className:'fl-field'},L('交付物（每行一项）','Deliverables (one per line)'),h('textarea',{value:deliverablesText,disabled:locked,rows:3,required:mode==='schedule','data-fleet-instantiate-deliverables':'',onChange:e=>setDeliverablesText(e.target.value)})),
+      h('label',{className:'fl-field'},L('交付物（每行一项，或 JSON 数组）','Deliverables (one per line, or a JSON array)'),h('textarea',{value:deliverablesText,disabled:locked,rows:3,required:mode==='schedule','data-fleet-instantiate-deliverables':'',onChange:e=>setDeliverablesText(e.target.value)})),
       h('label',{className:'fl-field'},L('整单验收标准（每行一条，可空）','Ticket-wide criteria (one per line, optional)'),h('textarea',{value:criteriaText,disabled:locked,rows:2,'data-fleet-instantiate-criteria':'',onChange:e=>setCriteriaText(e.target.value)})),
       h('label',{className:'fl-field'},L('补充要求（可空）','Requirements (optional)'),h('textarea',{value:requirements,disabled:locked,rows:2,'data-fleet-instantiate-requirements':'',onChange:e=>setRequirements(e.target.value)})),
       h('div',{className:'fl-field'},h('span',null,L('节点 Agent 分配','Node Agent assignments')),
@@ -562,6 +573,145 @@ export function createFleetViews(React) {
       h('div',{className:'fl-dialog-actions'},
         onCancel&&button(L('取消','Cancel'),onCancel,{className:'fl-btn fl-btn-ghost',disabled:submitting}),
         button(submitting?L('正在提交…','Submitting…'):(mode==='schedule'?L('启用计划','Enable schedule'):L('创建草稿','Create draft')),undefined,{type:'submit',className:'fl-btn fl-btn-primary',disabled:locked,'data-fleet-instantiate-submit':''}))));
+  }
+  // P-72／P-73 provenance display: a copied Template revision, or the source Ticket (and node) revision.
+  const templateSourceText=(source,L)=>!source?'—'
+    :source.templateId?`${source.templateId} · ${source.templateRevision==null?L('版本未知','revision unknown'):`v${source.templateRevision}`}`
+    :`${L('来源 Ticket','Source Ticket')} ${source.ticketId} · v${source.ticketRevision}${source.nodeId?` · ${L('节点','node')} ${source.nodeId}`:''}`;
+  // P-73: copy a Ticket's saved plan into a reusable orchestration template. Each local Agent is
+  // linked to an existing Root template, saved as a new one, or left unassigned; concrete Ticket/series
+  // dependencies are stripped. The preview uses the same value-copy rules as the Core write.
+  function SaveOrchestrationForm({L,ticket,catalog,busy=false,error=null,onSubmit,onCancel}) {
+    const plan=ticket.plan??{};
+    const localAgents=Object.entries(plan.agents??{});
+    const agentTemplates=list(catalog?.agents),orchestrations=list(catalog?.orchestrations);
+    const takenIds=new Set([...agentTemplates,...orchestrations].map(t=>t.id));
+    const agentSourceRefs={};
+    for(const a of list(ticket.activity))if(a.type==='template-applied'&&a.detail?.kind==='agent'&&a.detail.localId)agentSourceRefs[a.detail.localId]=a.detail;
+    const suggestId=()=>{const base=(ticketTitle(ticket)||ticket.id||'flow').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40)||'flow';let id=base,n=2;while(takenIds.has(id))id=`${base}-${n++}`;return id;};
+    const [mode,setMode]=React.useState('new');
+    const [newId,setNewId]=React.useState(suggestId);
+    const [updateId,setUpdateId]=React.useState(orchestrations[0]?.id??'');
+    const [name,setName]=React.useState(ticketTitle(ticket));
+    const [mapping,setMapping]=React.useState(()=>Object.fromEntries(localAgents.map(([localId,agent])=>{
+      const ref=agentSourceRefs[localId];
+      if(ref&&agentTemplates.some(t=>t.id===ref.templateId))return [localId,{mode:'link',templateId:ref.templateId}];
+      return [localId,{mode:'save',id:takenIds.has(localId)?`${localId}-agent`:localId,name:agent.name||localId}];
+    })));
+    const [localError,setLocalError]=React.useState(null);
+    const [submitting,setSubmitting]=React.useState(false);
+    const locked=busy||submitting;
+    const setMap=(localId,patch)=>setMapping(m=>({...m,[localId]:{...m[localId],...patch}}));
+    const sharedNodes=localId=>list(plan.nodes).filter(n=>n.agentId===localId).map(n=>n.id);
+    const strippedNodes=list(plan.nodes).filter(n=>list(n.ticketDependencies).length||list(n.ticketDependencySeries).length).map(n=>n.id);
+    const ticketLevelDeps=list(plan.ticketDependencies).length>0||list(plan.ticketDependencySeries).length>0;
+    const previewContent=orchestrationContentFromPlan(plan,mapping);
+    async function submit(event){
+      event.preventDefault();
+      if(locked)return;
+      const templateId=(mode==='new'?newId:updateId).trim();
+      if(!templateId){setLocalError(L('请填写模板 ID。','Please enter a template ID.'));return;}
+      const agentMapping={};
+      for(const [localId,entry] of Object.entries(mapping)){
+        if(entry.mode==='link'){
+          if(!entry.templateId){setLocalError(L(`请为 ${localId} 选择要关联的 Agent 模板。`,`Choose an Agent template to link for ${localId}.`));return;}
+          agentMapping[localId]={mode:'link',templateId:entry.templateId};
+        }else if(entry.mode==='save'){
+          const id=(entry.id||'').trim();
+          if(!id){setLocalError(L(`请为 ${localId} 填写新 Agent 模板 ID。`,`Enter a new Agent template ID for ${localId}.`));return;}
+          const nm=(entry.name||'').trim();
+          agentMapping[localId]={mode:'save',id,...(nm?{name:nm}:{})};
+        }else agentMapping[localId]={mode:'leave'};
+      }
+      const nm=name.trim();
+      setLocalError(null);setSubmitting(true);
+      try{await onSubmit({ticketId:ticket.id,id:templateId,...(nm?{name:nm}:{}),agentMapping,source:{ticketId:ticket.id,ticketRevision:ticket.revision,workspaceId:ticket.workspaceId},update:mode==='update'});}
+      finally{setSubmitting(false);}
+    }
+    return h('form',{onSubmit:submit,'data-fleet-save-orchestration-form':ticket.id},h('div',{className:'fl-stack'},
+      h('p',{className:'fl-help'},L('把此 Ticket 的当前已保存计划按值保存为 Root 编排模板；不改动 Ticket 本身，只追加一条活动记录。','Save this Ticket’s current saved plan by value as a Root orchestration template. The Ticket itself is unchanged; only one activity record is appended.')),
+      h('div',{className:'fl-row'},
+        button(L('保存为新模板','Save as new template'),()=>setMode('new'),{'aria-pressed':mode==='new','data-fleet-template-mode-new':'',disabled:locked}),
+        button(L('更新已有模板','Update existing template'),()=>setMode('update'),{'aria-pressed':mode==='update','data-fleet-template-mode-update':'',disabled:locked})),
+      mode==='new'
+        ?h('label',{className:'fl-field'},L('模板 ID','Template ID'),h('input',{value:newId,disabled:locked,required:true,'data-fleet-template-new-id':'',onChange:e=>setNewId(e.target.value)}))
+        :h('label',{className:'fl-field'},L('选择要更新的模板','Template to update'),h('select',{value:updateId,disabled:locked,'data-fleet-template-update-id':'',onChange:e=>setUpdateId(e.target.value)},...orchestrations.map(t=>h('option',{key:t.id,value:t.id},`${t.name||t.id} · v${t.revision}`)))),
+      h('label',{className:'fl-field'},L('名称（可选）','Name (optional)'),h('input',{value:name,disabled:locked,'data-fleet-template-name':'',onChange:e=>setName(e.target.value)})),
+      (strippedNodes.length>0||ticketLevelDeps)&&h('p',{className:'fl-notice','data-fleet-template-stripped':''},L('具体 Ticket／系列依赖不会进入模板（模板可复用，不绑定具体任务）。','Concrete Ticket/series dependencies are stripped from the template (templates are reusable and not bound to specific Tickets).')+(strippedNodes.length?L(` 涉及节点：${strippedNodes.join(' · ')}。`,` Affected nodes: ${strippedNodes.join(' · ')}.`):'')),
+      localAgents.length>0&&h('div',{className:'fl-field'},h('span',null,L('本地 Agent 处理','Local Agent handling')),
+        h('div',{className:'fl-stack'},...localAgents.map(([localId,agent])=>{
+          const entry=mapping[localId]||{mode:'leave'};
+          const shared=sharedNodes(localId);
+          return h('div',{className:'fl-card fl-card-pad',key:localId,'data-fleet-agent-map':localId},
+            h('div',{className:'fl-row fl-between'},h('strong',null,agent.name||localId),h('span',{className:'fl-mono fl-small fl-muted'},localId)),
+            shared.length>1&&h('p',{className:'fl-small fl-muted'},L(`共用节点：${shared.join(' · ')}`,`Shared nodes: ${shared.join(' · ')}`)),
+            h('select',{value:entry.mode,disabled:locked,'data-fleet-agent-map-mode':localId,onChange:e=>setMap(localId,{mode:e.target.value})},
+              h('option',{value:'link'},L('关联已有 Agent 模板','Link an existing Agent template')),
+              h('option',{value:'save'},L('保存为新 Agent 模板','Save as a new Agent template')),
+              h('option',{value:'leave'},L('留空（实例化时分配）','Leave unassigned (assign at instantiation)'))),
+            entry.mode==='link'&&h('select',{value:entry.templateId||'',disabled:locked,'data-fleet-agent-map-link':localId,onChange:e=>setMap(localId,{templateId:e.target.value})},
+              h('option',{value:''},L('请选择 Agent 模板','Choose an Agent template')),
+              ...agentTemplates.map(t=>h('option',{key:t.id,value:t.id},`${t.name||t.id} · v${t.revision}`))),
+            entry.mode==='save'&&h('div',{className:'fl-row'},
+              h('input',{value:entry.id||'',disabled:locked,placeholder:L('新模板 ID','New template ID'),'data-fleet-agent-map-save-id':localId,onChange:e=>setMap(localId,{id:e.target.value})}),
+              h('input',{value:entry.name||'',disabled:locked,placeholder:L('名称（可选）','Name (optional)'),'data-fleet-agent-map-save-name':localId,onChange:e=>setMap(localId,{name:e.target.value})})));
+        }))),
+      h('details',{className:'fl-spaced','data-fleet-template-preview':''},h('summary',null,L('预览将写入的模板内容','Preview the template content')),h('pre',null,json(previewContent))),
+      (localError||error)&&h('p',{className:'fl-notice',role:'alert','data-fleet-save-orchestration-error':''},localError||error),
+      h('div',{className:'fl-dialog-actions'},
+        onCancel&&button(L('取消','Cancel'),onCancel,{className:'fl-btn fl-btn-ghost',disabled:submitting}),
+        button(submitting?L('正在保存…','Saving…'):L('保存编排模板','Save orchestration template'),undefined,{type:'submit',className:'fl-btn fl-btn-primary',disabled:locked,'data-fleet-save-orchestration-submit':''}))));
+  }
+  // P-73／decision F: save one node's local Agent as a Root Agent template. The profile is copied
+  // as-is; the node's modelSelection becomes the Agent default only via the explicit checkbox.
+  function SaveAgentForm({L,ticket,nodeId,catalog,busy=false,error=null,onSubmit,onCancel}) {
+    const plan=ticket.plan??{};
+    const node=list(plan.nodes).find(n=>n.id===nodeId);
+    const agent=node?.agentId!=null?plan.agents?.[node.agentId]:null;
+    const agentTemplates=list(catalog?.agents);
+    const takenIds=new Set([...agentTemplates,...list(catalog?.orchestrations)].map(t=>t.id));
+    const baseId=node?.agentId||nodeId||'agent';
+    const suggestId=()=>{let id=takenIds.has(baseId)?`${baseId}-agent`:baseId,n=2;while(takenIds.has(id))id=`${baseId}-${n++}`;return id;};
+    const [mode,setMode]=React.useState('new');
+    const [newId,setNewId]=React.useState(suggestId);
+    const [updateId,setUpdateId]=React.useState(agentTemplates[0]?.id??'');
+    const [name,setName]=React.useState(agent?.name||node?.agentId||nodeId||'');
+    const [includeModel,setIncludeModel]=React.useState(false);
+    const [localError,setLocalError]=React.useState(null);
+    const [submitting,setSubmitting]=React.useState(false);
+    const locked=busy||submitting||!agent;
+    const sharedNodes=list(plan.nodes).filter(n=>n.agentId===node?.agentId).map(n=>n.id);
+    const nodeModel=node?.modelSelection;
+    const profile=agent?{...agent.profile,...(includeModel&&nodeModel?{modelSelection:nodeModel}:{})}:{};
+    const content={...(agent?.name!==undefined?{name:agent.name}:{}),profile};
+    async function submit(event){
+      event.preventDefault();
+      if(locked)return;
+      const templateId=(mode==='new'?newId:updateId).trim();
+      if(!templateId){setLocalError(L('请填写模板 ID。','Please enter a template ID.'));return;}
+      const nm=name.trim();
+      setLocalError(null);setSubmitting(true);
+      try{await onSubmit({kind:'agent',id:templateId,...(nm?{name:nm}:{}),content,source:{ticketId:ticket.id,ticketRevision:ticket.revision,workspaceId:ticket.workspaceId,nodeId},update:mode==='update'});}
+      finally{setSubmitting(false);}
+    }
+    if(!agent)return h('div',{className:'fl-stack'},h('p',{className:'fl-notice',role:'alert'},L('此节点没有可保存的本地 Agent。','This node has no local Agent to save.')),h('div',{className:'fl-dialog-actions'},button(L('关闭','Close'),onCancel,{className:'fl-btn fl-btn-ghost'})));
+    return h('form',{onSubmit:submit,'data-fleet-save-agent-form':nodeId},h('div',{className:'fl-stack'},
+      h('p',{className:'fl-help'},L('把此节点的本地 Agent 按值保存为 Root Agent 模板；Profile 原样复制，不改动 Ticket。','Save this node’s local Agent by value as a Root Agent template; the profile is copied as-is and the Ticket is unchanged.')),
+      kv(L('来源节点','Source node'),`${nodeId} · ${node.agentId}`),
+      sharedNodes.length>1&&h('p',{className:'fl-help','data-fleet-save-agent-shared':''},L(`同一 Agent 还被这些节点使用：${sharedNodes.join(' · ')}。模板只保存 Agent 定义。`,`The same Agent is also used by: ${sharedNodes.join(' · ')}. The template saves the Agent definition only.`)),
+      h('div',{className:'fl-row'},
+        button(L('保存为新模板','Save as new template'),()=>setMode('new'),{'aria-pressed':mode==='new','data-fleet-save-agent-mode-new':'',disabled:locked}),
+        button(L('更新已有模板','Update existing template'),()=>setMode('update'),{'aria-pressed':mode==='update','data-fleet-save-agent-mode-update':'',disabled:locked})),
+      mode==='new'
+        ?h('label',{className:'fl-field'},L('模板 ID','Template ID'),h('input',{value:newId,disabled:locked,required:true,'data-fleet-save-agent-id':'',onChange:e=>setNewId(e.target.value)}))
+        :h('label',{className:'fl-field'},L('选择要更新的模板','Template to update'),h('select',{value:updateId,disabled:locked,'data-fleet-save-agent-update':'',onChange:e=>setUpdateId(e.target.value)},...agentTemplates.map(t=>h('option',{key:t.id,value:t.id},`${t.name||t.id} · v${t.revision}`)))),
+      h('label',{className:'fl-field'},L('名称（可选）','Name (optional)'),h('input',{value:name,disabled:locked,'data-fleet-save-agent-name':'',onChange:e=>setName(e.target.value)})),
+      nodeModel&&h('label',{className:'fl-row fl-small'},h('input',{type:'checkbox',checked:includeModel,disabled:locked,'data-fleet-save-agent-model':'',onChange:e=>setIncludeModel(e.target.checked)}),L(`把本节点模型设为该 Agent 默认（${nodeModel.provider}/${nodeModel.model}${nodeModel.reasoningEffort?` · ${nodeModel.reasoningEffort}`:''}）`,`Set this node’s model as the Agent default (${nodeModel.provider}/${nodeModel.model}${nodeModel.reasoningEffort?` · ${nodeModel.reasoningEffort}`:''})`)),
+      h('div',{className:'fl-field'},h('span',null,L('将写入的内容','Content to be written')),readValue(content)),
+      (localError||error)&&h('p',{className:'fl-notice',role:'alert','data-fleet-save-agent-error':''},localError||error),
+      h('div',{className:'fl-dialog-actions'},
+        onCancel&&button(L('取消','Cancel'),onCancel,{className:'fl-btn fl-btn-ghost',disabled:submitting}),
+        button(submitting?L('正在保存…','Saving…'):L('保存 Agent 模板','Save Agent template'),undefined,{type:'submit',className:'fl-btn fl-btn-primary',disabled:locked,'data-fleet-save-agent-submit':''}))));
   }
   // P-68 calendar projection: past occurrences are facts; future slots are projected
   // client-side only for at/daily/weekly in the series timezone. every/cron/rrule show
@@ -1217,7 +1367,8 @@ export function createFleetViews(React) {
         h('div',{className:'fl-row fl-spaced'},
           attempts.length>1&&h('select',{'aria-label':L('执行轮次','Execution attempt'),value:attempt?.id||'',onChange:e=>setUI({attemptId:e.target.value})},...attempts.map((a,i)=>h('option',{key:a.id,value:a.id},`${i+1} · ${L(...names[a.status]||[a.status,a.status])}`))),
           attempt?.sessionId&&button(L('打开完整对话 ↗','Open full conversation ↗'),()=>openChat(attempt.sessionId),{'data-fleet-node-session':attempt.sessionId,className:'fl-btn fl-btn-ghost fl-btn-sm'}),
-          !ticket.abandonedAt&&['failed','interrupted','cancelled'].includes(node.status)&&['running','stopped'].includes(ticket.status)&&button(L('重试节点','Retry node'),()=>openDialog({kind:'retry',ticketId:ticket.id,nodeId:node.id})))),
+          !ticket.abandonedAt&&['failed','interrupted','cancelled'].includes(node.status)&&['running','stopped'].includes(ticket.status)&&button(L('重试节点','Retry node'),()=>openDialog({kind:'retry',ticketId:ticket.id,nodeId:node.id})),
+          plannedNode?.agentId!=null&&ticket.plan?.agents?.[plannedNode.agentId]&&isCurrentPlan(ticket.plan)&&button(L('保存为 Agent 模板','Save as Agent template'),()=>openDialog({kind:'template-from-node',ticketId:ticket.id,nodeId:node.id}),{disabled:o.busy,'data-fleet-save-agent':node.id}))),
       attempt?.upstreamTickets?.length?upstreamAttempt(attempt,o):upstreamDetails(node,ticket.nodeDependencyReadiness?.[node.id],ticket,o),
       nodePlanSections(configuredNode||node,ticket,{...o,historical:Boolean(attempt&&frozen)}),
       attempt?.error&&h('p',{className:'fl-notice',role:'alert','data-fleet-thread-error':node.id},text(attempt.error)),
@@ -1417,6 +1568,7 @@ export function createFleetViews(React) {
            ordinaryDraft&&!requiresSchedule&&!!ticket.plan?.ticketDependencies?.length&&button(ticket.dependencyAuthorization?L('关闭依赖自动启动','Disable automatic start'):L('上游交付后自动启动','Enable start after upstream delivery'),()=>act(dependencyAction,{ticketId:ticket.id,expectedRevision:ticket.revision}),{disabled:busy||(!ticket.dependencyAuthorization&&!validatePlan(ticket.plan,{mode:'start'}).valid),'data-fleet-dependency-action':dependencyAction}),
           draft&&!ticket.abandonedAt&&validatePlan(ticket.plan,{mode:'start'}).valid&&button(L('安排执行','Schedule'),()=>openDialog({kind:'schedule',ticketId:ticket.id}),{disabled:busy||!!scheduleUnavailable,'data-fleet-schedule-entry':ticket.id,title:scheduleUnavailable||L('按固定钟点一次性或周期执行','Run once or recurring at a fixed wall-clock time')}),
           validPlan&&button(editable?L('修改草稿','Edit draft'):L('查看计划','View plan'),()=>openDialog({kind:'revise',ticketId:ticket.id,ticket,ticketRevision:ticket.revision}),{disabled:busy}),
+          validPlan&&isCurrentPlan(ticket.plan)&&button(L('保存为编排模板','Save as orchestration template'),()=>openDialog({kind:'template-from-ticket',ticketId:ticket.id}),{disabled:busy,'data-fleet-save-orchestration':ticket.id}),
           ticket.status==='running'&&button(L('停止任务','Stop task'),()=>act('stop',{ticketId:ticket.id}),{disabled:busy,className:'fl-btn fl-btn-danger'}),
           ticket.status==='stopped'&&!ticket.abandonedAt&&button(L('恢复执行','Resume'),()=>act('resume',{ticketId:ticket.id}),{disabled:busy||!validPlan||ticket.dependencyReadiness?.ready===false,className:'fl-btn fl-btn-primary'}),
           ['draft','stopped'].includes(ticket.status)&&(ticket.abandonedAt
@@ -1499,11 +1651,11 @@ export function createFleetViews(React) {
       })));
       return h('div',{className:'fl-stack'},h('div',{className:'fl-row fl-between'},button(L('← 智能体','← Agents'),()=>navigate('agents'),{className:'fl-btn fl-btn-ghost'}),button(L('编辑共享定义','Edit shared definition'),()=>openDialog({kind:'root-agent',agent}))),
         h('div',{className:'fl-columns'},h('section',{className:'fl-card fl-card-pad'},row(h('span',{className:'fl-avatar','aria-hidden':true},String(agent.name||agent.id).slice(0,1).toUpperCase()),h('div',null,h('h2',null,agent.name||agent.id),h('p',{className:'fl-mono fl-small fl-muted'},agent.id)),badge(`v${agent.revision}`)),h('p',{className:'fl-help fl-spaced'},L('Root 模板；选用后按值复制到 Ticket，来源仅用于追溯。','Root template; content is copied into a Ticket and its source is retained for traceability.')),h('pre',{className:'fl-spaced'},agent.profile?.instructions||L('未配置角色指令','No role instructions')),h('div',{className:'fl-spaced'},details(L('配置与历史版本','Profile and revision history'),{profile:agent.profile,history:agent.history}))),
-          h('aside',{className:'fl-card fl-card-pad'},h('h2',null,L('定义摘要','Definition')),kv('ID',agent.id),kv(L('名称','Name'),agent.name||agent.id),kv(L('版本','Revision'),agent.revision),kv(L('创建时间','Created'),timestamp(agent.createdAt,L)),kv(L('更新时间','Updated'),timestamp(agent.updatedAt,L)),kv(L('DSH 预设','DSH preset'),agent.profile?.agentPreset||L('继承默认','Host default')),kv(L('模型 / Effort','Model / effort'),agent.profile?.modelSelection?`${agent.profile.modelSelection.provider}/${agent.profile.modelSelection.model}${agent.profile.modelSelection.reasoningEffort?` · ${agent.profile.modelSelection.reasoningEffort}`:''}`:L('继承宿主默认','Inherits host default')),kv(L('复制来源','Copied from'),agent.source?`${agent.source.templateId} · ${agent.source.templateRevision==null?L('版本未知','revision unknown'):`v${agent.source.templateRevision}`}`:'—'))),
+          h('aside',{className:'fl-card fl-card-pad'},h('h2',null,L('定义摘要','Definition')),kv('ID',agent.id),kv(L('名称','Name'),agent.name||agent.id),kv(L('版本','Revision'),agent.revision),kv(L('创建时间','Created'),timestamp(agent.createdAt,L)),kv(L('更新时间','Updated'),timestamp(agent.updatedAt,L)),kv(L('DSH 预设','DSH preset'),agent.profile?.agentPreset||L('继承默认','Host default')),kv(L('模型 / Effort','Model / effort'),agent.profile?.modelSelection?`${agent.profile.modelSelection.provider}/${agent.profile.modelSelection.model}${agent.profile.modelSelection.reasoningEffort?` · ${agent.profile.modelSelection.reasoningEffort}`:''}`:L('继承宿主默认','Inherits host default')),kv(L('复制来源','Copied from'),templateSourceText(agent.source,L)))),
         h('section',{className:'fl-card fl-card-pad'},h('h2',null,L('当前工作区执行记录','Executions in this workspace')),attempts.length?attempts.map(({ticket,node,attempt})=>h('div',{className:'fl-session fl-row fl-between',key:attempt.id},h('div',null,h('h3',null,`${ticket.goal} / ${node.id}`),status(attempt.status,L)),attempt.sessionId&&button(L('打开对话','Open conversation'),()=>o.openChat(attempt.sessionId),{'data-fleet-agent-session':attempt.sessionId}))):empty(L('此工作区暂无该智能体的执行记录','No executions for this Agent in this workspace'))));
     }
     const agentUsage=id=>list(data.tickets).filter(ticket=>Object.values(ticket.execution?.configurations??{}).some(cfg=>list(cfg?.sourceRefs).some(ref=>ref?.kind==='agent'&&ref.templateId===id))).length;
-    return h('div',{className:'fl-stack'},h('p',{className:'fl-help'},L('Root 智能体模板按值复制进任务；这里是全部共享定义。','Root Agent templates are copied by value into Tickets. All shared definitions live here.')),
+    return h('div',{className:'fl-stack'},h('div',{className:'fl-row fl-between'},h('p',{className:'fl-help'},L('Root 智能体模板按值复制进任务；这里是全部共享定义。','Root Agent templates are copied by value into Tickets. All shared definitions live here.')),button(L('新建','New'),()=>openDialog({kind:'template-new',templateKind:'agent'}),{className:'fl-btn fl-btn-primary','data-fleet-template-new':'agent'})),
       agents.length?h('div',{className:'fl-glist','data-fleet-agent-list':''},
         h('div',{className:'fl-ghead'},h('span',null,L('智能体','Agents')),h('span',{className:'fl-count'},agents.length),h('span',{className:'fl-count'},L('引用任务数 · 版本','Tickets using · Revision'))),
         ...agents.map(agent=>h('article',{className:'fl-grow fl-lrow',key:agent.id,'data-fleet-agent':agent.id},
@@ -1534,11 +1686,11 @@ export function createFleetViews(React) {
             h('span',{className:'fl-cell'},node.agentId||L('未分配','Unassigned')),
             h('span',{className:'fl-cell fl-mono'},list(node.dependsOn).join(', ')||'—'),
             h('span',{className:'fl-cell'},gateBefore?badge(L('关卡前','Before gate'),'waiting'):badge(L('执行节点','Agent node'),'neutral')));}))):null,
-        h('section',{className:'fl-card fl-card-pad'},kv(L('名称','Name'),selected.name||selected.id),kv(L('复制来源','Copied from'),selected.source?`${selected.source.templateId} · ${selected.source.templateRevision==null?L('版本未知','revision unknown'):`v${selected.source.templateRevision}`}`:'—'),kv(L('创建时间','Created'),timestamp(selected.createdAt,L)),kv(L('更新时间','Updated'),timestamp(selected.updatedAt,L)),details(L('历史修订','Revision history'),selected.history)),
+        h('section',{className:'fl-card fl-card-pad'},kv(L('名称','Name'),selected.name||selected.id),kv(L('复制来源','Copied from'),templateSourceText(selected.source,L)),kv(L('逻辑路由','Logic gates'),list(selected.definition?.logicGates).length?`${list(selected.definition.logicGates).length} ${L('条','gates')}`:L('无','None')),kv(L('默认值','Defaults'),selected.definition?.defaults?L('有（实例化时预填）','Present (prefill at instantiation)'):L('无','None')),kv(L('创建时间','Created'),timestamp(selected.createdAt,L)),kv(L('更新时间','Updated'),timestamp(selected.updatedAt,L)),details(L('历史修订','Revision history'),selected.history)),
         h('section',{className:'fl-card'},h('div',{className:'fl-card-head'},h('h2',null,L('关联执行记录','Linked execution records')),badge(executions.length)),executions.length?h('div',{className:'fl-card-pad'},...executions.map(({ticket,configRevision})=>ticketLink(ticket,o,{label:`${ticket.id} · v${configRevision}`,key:`${ticket.id}:${configRevision}`,className:'fl-btn'}))):empty(L('暂无使用此模板的执行记录','No execution records reference this template'))));
     }
     const flowUsage=id=>list(data.tickets).filter(ticket=>Object.values(ticket.execution?.configurations??{}).some(cfg=>list(cfg?.sourceRefs).some(ref=>ref?.kind==='orchestration'&&ref.templateId===id))).length;
-    return h('div',{className:'fl-stack'},h('p',{className:'fl-help'},L('共享编排定义节点与审核关卡；应用时按值复制进任务。','Shared orchestrations define nodes and review gates, copied by value into Tickets.')),
+    return h('div',{className:'fl-stack'},h('div',{className:'fl-row fl-between'},h('p',{className:'fl-help'},L('共享编排定义节点与审核关卡；应用时按值复制进任务。','Shared orchestrations define nodes and review gates, copied by value into Tickets.')),button(L('新建','New'),()=>openDialog({kind:'template-new',templateKind:'orchestration'}),{className:'fl-btn fl-btn-primary','data-fleet-template-new':'orchestration'})),
       flows.length?h('div',{className:'fl-glist','data-fleet-flow-list':''},
         h('div',{className:'fl-ghead'},h('span',null,L('编排','Orchestrations')),h('span',{className:'fl-count'},flows.length),h('span',{className:'fl-count'},L('引用任务数 · 版本','Tickets using · Revision'))),
         ...flows.map(item=>{
@@ -1698,7 +1850,7 @@ export function createFleetViews(React) {
     if(!d)return null;
     const close=()=>setUI({dialog:null,dialogError:null});
     const field=(label,name,value='',props={})=>h('label',{className:'fl-field',key:name},label,h(props.multiline?'textarea':'input',{name,defaultValue:value,...props,multiline:undefined}));
-    const title=d.kind==='review'?(d.decision==='passed'?L('审核通过','Pass review'):L('退回审核','Return review')):({revise:L('修改任务草稿','Edit draft'),start:L('确认执行计划','Confirm execution plan'),retry:L('重试节点','Retry node'),change:L('修改当前节点任务','Change this node task'),pass:L('人工通过审核','Pass review as human'),'deliver-override':L('人工交付覆盖','Human delivery override'),abandon:L('放弃执行此 Ticket','Abandon this Ticket'),deliverable:L('交付物详情','Deliverable details'),preview:L('旧草稿预览','Legacy draft preview'),'root-agent':L('编辑共享智能体','Edit Root Agent'),'root-flow':L('编辑共享编排','Edit Root orchestration'),schedule:L('安排执行','Schedule runs'),instantiate:L('从模板新建 Ticket','New Ticket from template'),'series-config':L('编辑系列配置','Edit series configuration'),'series-delete':L('删除计划','Delete schedule')})[d.kind];
+    const title=d.kind==='review'?(d.decision==='passed'?L('审核通过','Pass review'):L('退回审核','Return review')):({revise:L('修改任务草稿','Edit draft'),start:L('确认执行计划','Confirm execution plan'),retry:L('重试节点','Retry node'),change:L('修改当前节点任务','Change this node task'),pass:L('人工通过审核','Pass review as human'),'deliver-override':L('人工交付覆盖','Human delivery override'),abandon:L('放弃执行此 Ticket','Abandon this Ticket'),deliverable:L('交付物详情','Deliverable details'),preview:L('旧草稿预览','Legacy draft preview'),'root-agent':L('编辑共享智能体','Edit Root Agent'),'root-flow':L('编辑共享编排','Edit Root orchestration'),schedule:L('安排执行','Schedule runs'),instantiate:L('从模板新建 Ticket','New Ticket from template'),'series-config':L('编辑系列配置','Edit series configuration'),'series-delete':L('删除计划','Delete schedule'),'template-new':L('新建 Root 模板','New Root template'),'template-from-ticket':L('保存为编排模板','Save as orchestration template'),'template-from-node':L('保存为 Agent 模板','Save as Agent template')})[d.kind];
     const ticket=list(data.tickets).find(t=>t.id===d.ticketId);
     if(d.kind==='draft-delete'){
       const changed=!canDeleteDraft(ticket)||ticket.revision!==d.expectedRevision;
@@ -1728,6 +1880,14 @@ export function createFleetViews(React) {
       const flow=list(data.catalog?.orchestrations).find(f=>f.id===d.flowId);
       if(!flow)return h(Modal,{title,onClose:close,busy,L},empty(L('编排模板不存在','Orchestration template not found')));
       return h(Modal,{title,onClose:close,busy,L},h(TemplateTicketForm,{L,flow,catalog:data.catalog,mode:'instantiate',busy,error:ui.dialogError,onCancel:close,onSubmit:async args=>(await act('template-instantiate',args))?.result??null}));
+    }
+    if(d.kind==='template-from-ticket'){
+      if(!ticket)return h(Modal,{title,onClose:close,busy,L},empty(L('任务不存在','Ticket not found')));
+      return h(Modal,{title,onClose:close,busy,L},h(SaveOrchestrationForm,{L,ticket,catalog:data.catalog,busy,error:ui.dialogError,onCancel:close,onSubmit:async args=>{await act('template-save-from-ticket',args);}}));
+    }
+    if(d.kind==='template-from-node'){
+      if(!ticket)return h(Modal,{title,onClose:close,busy,L},empty(L('任务不存在','Ticket not found')));
+      return h(Modal,{title,onClose:close,busy,L},h(SaveAgentForm,{L,ticket,nodeId:d.nodeId,catalog:data.catalog,busy,error:ui.dialogError,onCancel:close,onSubmit:async args=>{await act('template-save',args);}}));
     }
     if(d.kind==='series-config'){
       const series=list(data.series?.items).find(s=>s.id===d.seriesId);
@@ -1759,11 +1919,13 @@ export function createFleetViews(React) {
     }
     else if(d.kind==='root-agent')fields.push(field(L('角色指令','Instructions'),'instructions',d.agent.profile?.instructions||'',{multiline:true,rows:8}),h('label',{className:'fl-field',key:'preset'},L('DSH 预设','DSH preset'),h('input',{name:'agentPreset',defaultValue:d.agent.profile?.agentPreset||'',list:'fleet-presets'}),h('datalist',{id:'fleet-presets'},...list(data.catalog?.availablePresets).map(p=>{const id=typeof p==='string'?p:p.id;return h('option',{key:id,value:id},typeof p==='string'?p:p.name||p.label||id);}))),h('div',{key:'model',className:'fl-field'},h('span',{className:'fl-small fl-muted'},L('模型 / Effort（留空继承宿主默认）','Model / effort (empty inherits the host default)')),h(ModelFields,{catalog:data.catalog?.modelCatalog,initial:d.agent.profile?.modelSelection,L,prefix:'root-'})),h('p',{key:'scope',className:'fl-help'},L('更新全局共享定义。已启动的任务保留原快照；模型选择按值复制到选用的 Ticket。','Updates the shared Root definition. Started Tickets retain their snapshots; the model selection is copied by value into Tickets that use it.')));
     else if(d.kind==='root-flow')fields.push(field(L('编排定义 JSON','Orchestration definition JSON'),'definition',json(d.flow.definition),{required:true,multiline:true,rows:14}),h('p',{key:'scope',className:'fl-help'},L('更新全局共享编排；已启动的任务保留原计划。','Updates the shared Root orchestration; started Tickets retain their plans.')));
+    else if(d.kind==='template-new')fields.push(field(L('模板 ID','Template ID'),'id','',{required:true}),field(L('名称（可选）','Name (optional)'),'name',''),field(L('模板内容 JSON','Template content JSON'),'content',d.templateKind==='agent'?json({name:'',profile:{instructions:''}}):json({nodes:[],gates:[]}),{required:true,multiline:true,rows:12}),h('p',{key:'scope',className:'fl-help'},L('新建要求 ID 未被使用；ID 已存在时会被拒绝，请改用「编辑共享定义」更新已有模板（保留历史）。','Creating requires an unused ID; a duplicate is rejected — use “Edit shared definition” to update an existing template (history is kept).')));
     async function submit(event) {
       event.preventDefault();const f=new FormData(event.currentTarget);const value=name=>String(f.get(name)||'');
       try {
         if(d.kind==='root-agent') {const profile={...d.agent.profile,instructions:value('instructions')};if(value('agentPreset').trim())profile.agentPreset=value('agentPreset').trim();else delete profile.agentPreset;const provider=value('root-provider').trim(),model=value('root-model').trim(),effort=value('root-effort').trim();if(provider&&model)profile.modelSelection={provider,model,...(effort?{reasoningEffort:effort}:{})};else delete profile.modelSelection;await act(d.kind,{agentId:d.agent.id,profile});}
         else if(d.kind==='root-flow')await act(d.kind,{orchestrationId:d.flow.id,definition:JSON.parse(value('definition'))});
+        else if(d.kind==='template-new'){const name=value('name').trim();await act('template-save',{kind:d.templateKind,id:value('id').trim(),...(name?{name}:{}),content:JSON.parse(value('content'))});}
         else await act(d.kind,{ticketId:d.ticketId,...(d.nodeId?{nodeId:d.nodeId}:{}),...(d.gateId?{gateId:d.gateId}:{}),...(d.kind==='retry'||d.kind==='deliver-override'?{reason:value('reason')}:{}),...(d.kind==='abandon'?{expectedRevision:d.expectedRevision,...(value('reason').trim()?{reason:value('reason').trim()}:{})}:{}),...(d.kind==='change'?{task:JSON.parse(value('task'))}:{}),...(d.kind==='review'?{decision:d.decision==='passed'?'passed':'returned',evidence:value('evidence')}:{})});
       }catch(error){setUI({dialogError:error instanceof SyntaxError?'fleet-ui/invalid-json':error.message});}
     }
@@ -1912,7 +2074,7 @@ export function createFleetViews(React) {
       setNote(null);setEditing(kind);
       if(kind==='crit')setEditCrits([...criteria]);
       if(kind==='target')setTargetForm(viewPlan.inputs?.deliveryTarget??'');
-      if(kind.startsWith('gate:')){const g=gates.find(x=>x.id===kind.slice(5));setGateForm({gateId:kind.slice(5),requireEvidence:!!g?.requireEvidence,reworkEnabled:!!g?.rework,maxRounds:g?.rework?.maxRounds??2,targetNodes:(g?.rework?.targetNodes??[]).join('\n'),scopeNote:g?.rework?.scopeNote??''});}
+      if(kind.startsWith('gate:')){const g=gates.find(x=>x.id===kind.slice(5));setGateForm({gateId:kind.slice(5),requireEvidence:!!g?.requireEvidence,reworkEnabled:g?.rework?g.rework.maxRounds!==0:true,maxRounds:g?.rework?.maxRounds??3,targetNodes:(g?.rework?.targetNodes??[]).join('\n'),scopeNote:g?.rework?.scopeNote??'',reworkSession:g?.rework?.reworkSession??'reuse'});}
       if(kind.startsWith('review:')){
         const g=gates.find(item=>item.id===kind.slice(7));
         setGateForm({summary:g.reviewTask?.summary||'',inputs:list(g.reviewTask?.inputs).join('\n'),checks:list(g.reviewTask?.checks).join('\n')});
@@ -1935,7 +2097,7 @@ export function createFleetViews(React) {
     const cancelEdit=()=>{if(editing&&/^(gate|review|caps|gmodel|contract|summary|model|amodel):/.test(editing))detailEdits.current.delete(popout);if(dirty&&!saving){const fields=toFields(base);structural.current=null;current.current={...current.current,values:fields,dirty:false,structural:null};setValues(fields);setDirty(false);o.onDirtyChange?.(false);}setEditing(null);setEditCrits(null);setGateForm(null);setContractForm(null);setTargetForm(null);setSummaryForm(null);setModelForm(null);setDcritForm(null);};
     const applyEdit=()=>{
       if(editing?.startsWith('gate:')&&gateForm){
-        const ok=applyStructural(p=>applyGatePolicy(p,gateForm.gateId,{requireEvidence:gateForm.requireEvidence,rework:gateForm.reworkEnabled?{maxRounds:Number(gateForm.maxRounds),targetNodes:lines(gateForm.targetNodes),scopeNote:gateForm.scopeNote}:null}));
+        const ok=applyStructural(p=>applyGatePolicy(p,gateForm.gateId,{requireEvidence:gateForm.requireEvidence,rework:gateForm.reworkEnabled?{maxRounds:Number(gateForm.maxRounds),targetNodes:lines(gateForm.targetNodes),scopeNote:gateForm.scopeNote,reworkSession:gateForm.reworkSession}:{maxRounds:0}}));
         if(!ok)return;clearDetail(popout);setGateForm(null);
       }else if(['review','caps','gmodel'].includes(detailKind)){
         const field={review:'reviewTask',caps:'plannedCapabilities',gmodel:'modelSelection'}[detailKind];
@@ -2140,23 +2302,27 @@ export function createFleetViews(React) {
             popNode.task?.contract?.scope&&h('div',{className:'fl-spaced'},h('p',{className:'fl-small fl-muted'},L('范围提示（非写锁）','Scope hints (not a write lock)')),readValue(popNode.task.contract.scope)),
             evidenceList(L('建议验证','Suggested verification'),popNode.task?.contract?.verify,true))),
         h('details',null,h('summary',null,L('完整任务与配置','Full task and profile')),readValue({task:popNode.task,profile:popAgent?.profile})),
-        editable&&row(button(L('编辑配置','Edit configuration'),()=>setNote(L('结构化配置（节点、智能体和关卡）请在对话中描述，由 Agent 更新此 Ticket。','Describe structural changes (nodes, agents and gates) in the conversation; the Agent updates this Ticket.'))))))
+        editable&&row(button(L('编辑配置','Edit configuration'),()=>setNote(L('结构化配置（节点、智能体和关卡）请在对话中描述，由 Agent 更新此 Ticket。','Describe structural changes (nodes, agents and gates) in the conversation; the Agent updates this Ticket.')))),
+        popAgent&&typeof o.openDialog==='function'&&row(button(L('保存为 Agent 模板','Save as Agent template'),()=>o.openDialog({kind:'template-from-node',ticketId:base.id,nodeId:popNode.id}),{className:'fl-btn','data-fleet-save-agent-pop':popNode.id,disabled:o.busy}))))
       :popReady&&popGate?h('div',{className:'fl-popout',ref:popPanelRef,role:'dialog','aria-label':L('关卡详情','Gate details'),style:popStyle},
         h('div',{className:'fl-pophead'},row(h('strong',null,popGate.id),h('span',{className:'fl-small fl-muted'},L('关卡详情','Gate details')),h('span',{style:{marginLeft:'auto'}},editable&&button(editing===`gate:${popGate.id}`?'✕':'✎',()=>editing===`gate:${popGate.id}`?cancelEdit():openEdit(`gate:${popGate.id}`),{className:'fl-btn fl-btn-ghost','aria-label':L('编辑关卡策略','Edit gate policy'),'data-fleet-gate-edit':popGate.id}),button('×',closeFromButton,{className:'fl-btn fl-btn-ghost','aria-label':L('关闭','Close')})))),
         h('div',{className:'fl-popbody'},
         popGate.reviewer?.kind==='human'&&h(React.Fragment,null,kv(L('审核','Reviewer'),L('你（人工）','You (human)')),kv(L('来源','From'),list(popGate.from).join(' · ')||'—'),kv(L('去向','To'),list(popGate.to).join(' · ')||'—')),
         popGate.reviewer?.kind==='agent'&&gatePlanSections(popGate,popReviewNode,agents,o,reviewControls(popGate)),
+        popReviewNode&&popReviewNode.agentId!=null&&agents[popReviewNode.agentId]&&typeof o.openDialog==='function'&&row(button(L('保存审核 Agent 为模板','Save reviewer Agent as template'),()=>o.openDialog({kind:'template-from-node',ticketId:base.id,nodeId:popReviewNode.id}),{className:'fl-btn','data-fleet-save-agent-gate':popReviewNode.id,disabled:o.busy})),
         editing===`gate:${popGate.id}`&&gateForm?h('div',{className:'fl-stack fl-spaced'},
           h('label',{className:'fl-row fl-small'},h('input',{type:'checkbox',checked:gateForm.requireEvidence,disabled:locked,onChange:e=>setGateForm({...gateForm,requireEvidence:e.target.checked}),'data-fleet-gate-evidence':''}),L('必须提交结构化证据','Structured evidence required')),
-          h('label',{className:'fl-row fl-small'},h('input',{type:'checkbox',checked:gateForm.reworkEnabled,disabled:locked,onChange:e=>setGateForm({...gateForm,reworkEnabled:e.target.checked}),'data-fleet-gate-rework':''}),L('启用预批准返工','Enable pre-approved rework')),
+          h('label',{className:'fl-row fl-small'},h('input',{type:'checkbox',checked:gateForm.reworkEnabled,disabled:locked,onChange:e=>setGateForm({...gateForm,reworkEnabled:e.target.checked}),'data-fleet-gate-rework':''}),L('退回自动返工','Auto rework on return')),
           gateForm.reworkEnabled&&h(React.Fragment,null,
-            h('label',{className:'fl-small'},L('最大自动返工轮数','Max auto rework rounds'),h('input',{className:'fl-input',type:'number',min:1,value:gateForm.maxRounds,disabled:locked,onChange:e=>setGateForm({...gateForm,maxRounds:e.target.value}),'data-fleet-gate-maxrounds':''})),
+            h('label',{className:'fl-small'},L('最大自动返工轮数（0 关闭）','Max auto rework rounds (0 disables)'),h('input',{className:'fl-input',type:'number',min:0,value:gateForm.maxRounds,disabled:locked,onChange:e=>setGateForm({...gateForm,maxRounds:e.target.value}),'data-fleet-gate-maxrounds':''})),
+            h('label',{className:'fl-small'},L('返工会话','Rework session'),h('select',{className:'fl-input',value:gateForm.reworkSession,disabled:locked,onChange:e=>setGateForm({...gateForm,reworkSession:e.target.value}),'data-fleet-gate-reworksession':''},h('option',{value:'reuse'},L('复用上一轮会话','Reuse previous session')),h('option',{value:'new'},L('每次新开会话','New session each round')))),
             h('label',{className:'fl-small'},L('返工目标节点（每行一个 ID，缺省来源节点）','Rework target nodes (one ID per line; default: source nodes)'),h('textarea',{className:'fl-input',rows:2,value:gateForm.targetNodes,disabled:locked,onChange:e=>setGateForm({...gateForm,targetNodes:e.target.value}),'data-fleet-gate-targets':''})),
             h('label',{className:'fl-small'},L('返工范围说明','Rework scope note'),h('textarea',{className:'fl-input',rows:2,value:gateForm.scopeNote,disabled:locked,onChange:e=>setGateForm({...gateForm,scopeNote:e.target.value}),'data-fleet-gate-scopenote':''}))),
           ibar())
         :h(React.Fragment,null,
           kv(L('结构化证据','Structured evidence'),popGate.requireEvidence?L('必须提交','Required'):L('不强制','Optional')),
-          kv(L('返工策略','Rework policy'),popGate.rework?(popGate.reviewer?.kind==='human'?L('开启 · 人工退回无限次','Enabled · unlimited human returns'):L(`开启 · 自动返工上限 ${popGate.rework.maxRounds??0} 轮`,`Enabled · auto rework capped at ${popGate.rework.maxRounds??0} rounds`)):L('关闭','Disabled')),
+          kv(L('返工策略','Rework policy'),(()=>{const r=popGate.rework,isAgent=popGate.reviewer?.kind==='agent',rounds=r?.maxRounds??(isAgent?3:0),on=isAgent?rounds>0:r?.maxRounds!==0;return on?(isAgent?L(`开启 · 自动返工上限 ${rounds} 轮`,`Enabled · auto rework capped at ${rounds} rounds`):L('开启 · 人工退回无限次','Enabled · unlimited human returns')):L('关闭','Disabled');})()),
+          kv(L('返工会话','Rework session'),popGate.rework?.reworkSession==='new'?L('每次新开','New each round'):L('复用上一轮会话','Reuse previous session')),
           list(popGate.rework?.targetNodes).length>0&&kv(L('返工目标','Rework targets'),popGate.rework.targetNodes.join(' · ')),
           popGate.rework?.scopeNote&&kv(L('范围说明','Scope note'),popGate.rework.scopeNote)))):null;
     const titleText=values.title?firstSentence(values.title):readableTitle(values.goal);
@@ -2359,7 +2525,24 @@ export function createFleetViews(React) {
             button(on ? L('关闭','Disable') : L('开启','Enable'),() => o.toggleWorkspace(id,!on),{className:'fl-btn fl-btn-sm','data-fleet-toggle':id,'aria-pressed':on,disabled:!mode.ready || mode.pending}))); 
       })));
     const tabs = [['attention',L('需要关注','Needs attention')],['schedule',L('计划','Schedules')],['all',L('全部 Tickets','All tickets')]];
+    const admin = o.admin && Array.isArray(o.admin.workspaces) ? o.admin.workspaces : null;
+    if (admin?.length) tabs.push(['admin',L('Admin','Admin')]);
     const settingsTab = ['settings',L('工作区配置','Workspace settings')];
+    const adminView = () => {
+      const scope = new Set(admin.flatMap(entry => entry.scope === 'all' ? list(projects).map(project => project.workspaceId) : list(entry.scope)));
+      const feed = tickets.filter(ticket => scope.has(ticket.project.workspaceId)).sort((a,b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')).slice(0,25);
+      return h(React.Fragment,null,
+        h('div',{className:'fl-metrics fl-strip'},
+          metric(L('Admin 工作区','Admin workspaces'),admin.length,L('被授予管理面的工作区','Workspaces granted the Admin surface')),
+          metric(L('可管理任务','Managed tickets'),feed.length,L('范围内的 Ticket（最近更新）','Tickets in scope, most recent'))),
+        h('div',{className:'fl-section-title'},h('h2',null,L('授权范围','Granted scope')),
+          h('p',null,L('由工作区在自身配置中开启；活动仅供参考，写入走 Admin Command 或 Command Tools。','Enabled by each Workspace in its own configuration; this feed is read-only.'))),
+        h('section',{className:'fl-card','data-fleet-admin-grants':''},...admin.map(entry => h('div',{key:entry.workspaceId,className:'fl-root-settings-row','data-fleet-admin-grant':entry.workspaceId},
+          h('div',{className:'fl-control-info'},h('h3',null,entry.workspaceId),h('p',{className:'fl-small fl-muted'},entry.scope === 'all' ? L('管理全部工作区','All workspaces') : L(`管理：${list(entry.scope).join(' · ')}`,'Managed: ' + list(entry.scope).join(' · ')))),
+          h('div',null,badge(entry.scope === 'all' ? L('全部','All') : L('范围','Scoped'),'waiting'))))),
+        h('div',{className:'fl-section-title'},h('h2',null,L('Admin Feed','Admin feed')),h('p',null,L('范围内最近更新的 Ticket','Recently updated Tickets in scope'))),
+        feed.length ? h('section',{className:'fl-glist','data-fleet-admin-feed':''},...feed.map(row)) : h('div',{className:'fl-card fl-empty'},h('p',null,L('范围内暂无 Ticket','No tickets in scope'))));
+    };
     const current = [...tabs,settingsTab].find(([key]) => key === tab);
     const navButton = ([key,label]) => button(label,() => setTab(key),{key,className:'fl-btn fl-btn-ghost','data-fleet-root-tab':key,'aria-current':tab === key ? 'page' : undefined});
     return h('div',{className:'fl-content'},
@@ -2368,11 +2551,12 @@ export function createFleetViews(React) {
       h('nav',{className:'fl-overview-nav','aria-label':L('Fleet 总览导航','Fleet overview navigation')},
         h('div',{className:'fl-overview-nav-group'},...tabs.map(navButton)),navButton(settingsTab)),
       h('header',{className:'fl-head'},h('div',null,h('h1',{id:'fleet-control-title'},tab === 'attention' ? L('Fleet 总览','Fleet overview') : current?.[1]),
-        h('p',null,tab === 'settings' ? L('按工作区开启或关闭 DSH Fleet。','Enable or disable DSH Fleet by workspace.') : L('汇总已登记工作区的 Ticket 和计划。','Tickets and schedules across registered workspaces.'))),
+        h('p',null,tab === 'settings' ? L('按工作区开启或关闭 DSH Fleet。','Enable or disable DSH Fleet by workspace.') : tab === 'admin' ? L('被授予的 Admin 范围与跨工作区动态。','Granted Admin scope and cross-workspace activity.') : L('汇总已登记工作区的 Ticket 和计划。','Tickets and schedules across registered workspaces.'))),
         button(pending ? L('读取中…','Loading…') : L('刷新','Refresh'),() => o.refresh(),{className:'fl-btn',disabled:pending})),
       error && h('div',{className:'fl-notice',role:'alert'},h('p',null,error),button(L('重试','Retry'),() => o.refresh(),{className:'fl-btn fl-btn-sm'})),
       notice && h('p',{className:'fl-notice',role:'status'},notice),
       tab === 'settings' ? settings() :
+      tab === 'admin' ? adminView() :
       pending && !list(projects).length ? h('p',{className:'fl-loading',role:'status'},L('正在读取…','Loading…')) :
       tab === 'attention' ? attention() : tab === 'schedule'
         ? h(ScheduleCalendar,{L,items:list(series),act:o.actSeries,busy:false,

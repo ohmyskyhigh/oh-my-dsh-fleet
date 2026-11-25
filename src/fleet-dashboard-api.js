@@ -75,7 +75,9 @@ function actionInput(body) {
     'deliver-override': ['ticketId', 'reason'],
     abandon: ['ticketId', 'expectedRevision', 'reason'],
     unabandon: ['ticketId', 'expectedRevision'],
-    'root-agent': ['agentId', 'profile'], 'root-flow': ['orchestrationId', 'definition']
+    'root-agent': ['agentId', 'profile'], 'root-flow': ['orchestrationId', 'definition'],
+    'template-save': ['kind', 'id', 'name', 'content', 'source', 'update'],
+    'template-save-from-ticket': ['ticketId', 'id', 'name', 'agentMapping', 'source', 'update']
   };
   if (typeof body.action !== 'string' || !Object.hasOwn(specs, body.action)) invalid('Unknown Fleet action.');
   fields(body, [...common, ...specs[body.action]], 'request');
@@ -149,6 +151,49 @@ function actionInput(body) {
     case 'deliver-override': id(body.ticketId, 'ticketId'); text(body.reason, 'reason'); break;
     case 'root-agent': record(body.profile, 'profile'); break;
     case 'root-flow': flow(body.definition); break;
+    case 'template-save':
+      if (!['agent', 'orchestration'].includes(body.kind)) invalid('kind must be agent or orchestration.');
+      id(body.id, 'id');
+      if (body.name !== undefined) text(body.name, 'name');
+      record(body.content, 'content');
+      if (body.kind === 'agent') {
+        fields(body.content, ['name', 'profile'], 'Agent Template content');
+        record(body.content.profile, 'content.profile');
+        if (body.content.name !== undefined) text(body.content.name, 'content.name');
+      } else {
+        flow(body.content);
+        if (body.content.logicGates !== undefined) {
+          if (!Array.isArray(body.content.logicGates)) invalid('content.logicGates must be an array.');
+          for (const gate of body.content.logicGates) { record(gate, 'logicGate'); id(gate.id, 'logicGate.id'); id(gate.from, 'logicGate.from'); if (!Array.isArray(gate.routes)) invalid('logicGate.routes must be an array.'); }
+        }
+        if (body.content.defaults !== undefined) fields(body.content.defaults, ['goal', 'inputs', 'deliverables', 'criteria', 'requirements'], 'Template defaults');
+      }
+      if (body.update !== undefined && typeof body.update !== 'boolean') invalid('update must be a boolean.');
+      break;
+    case 'template-save-from-ticket':
+      id(body.id, 'id');
+      if (body.name !== undefined) text(body.name, 'name');
+      record(body.agentMapping, 'agentMapping');
+      for (const [localId, entry] of Object.entries(body.agentMapping)) {
+        id(localId, 'agentMapping key'); fields(entry, ['mode', 'templateId', 'id', 'name'], 'agentMapping entry');
+        if (!['link', 'save', 'leave'].includes(entry.mode)) invalid('agentMapping mode must be link, save or leave.');
+        if (entry.mode === 'link') id(entry.templateId, 'agentMapping.templateId');
+        if (entry.mode === 'save') { id(entry.id, 'agentMapping.id'); if (entry.name !== undefined) text(entry.name, 'agentMapping.name'); }
+      }
+      if (body.update !== undefined && typeof body.update !== 'boolean') invalid('update must be a boolean.');
+      break;
+  }
+  if (['template-save', 'template-save-from-ticket'].includes(body.action) && body.source !== undefined) {
+    record(body.source, 'source');
+    if (Object.hasOwn(body.source, 'templateId')) {
+      fields(body.source, ['templateId', 'templateRevision'], 'source'); id(body.source.templateId, 'source.templateId');
+      if (!Number.isSafeInteger(body.source.templateRevision) || body.source.templateRevision < 1) invalid('source.templateRevision must be a positive integer.');
+    } else {
+      fields(body.source, ['ticketId', 'ticketRevision', 'workspaceId', 'nodeId'], 'source');
+      id(body.source.ticketId, 'source.ticketId'); id(body.source.workspaceId, 'source.workspaceId');
+      if (!Number.isSafeInteger(body.source.ticketRevision) || body.source.ticketRevision < 1) invalid('source.ticketRevision must be a positive integer.');
+      if (body.source.nodeId !== undefined) id(body.source.nodeId, 'source.nodeId');
+    }
   }
   return body;
 }
@@ -280,7 +325,7 @@ export function registerFleetDashboardApi(ctx, { getService }) {
     const { service, target } = await context(body.workspaceId, false);
     if (!service.health.ready) fail(503, 'service-unavailable', service.health.error ?? 'Fleet service is not ready.');
     const configurationAction = ['draft-save', 'draft-repair', 'draft-regenerate'].includes(body.action);
-    if (body.action === 'template-instantiate' || body.action === 'series-create') {
+    if (body.action === 'template-instantiate' || body.action === 'series-create' || body.action === 'template-save-from-ticket' || (body.action === 'template-save' && body.source?.ticketId !== undefined)) {
       await service.registerWorkspace(target.id,target.path); validateTarget(service,target);
     }
     const originlessSave = body.action === 'draft-save' && body.ticketId && body.sessionId == null;
@@ -338,7 +383,9 @@ export function registerFleetDashboardApi(ctx, { getService }) {
         abandon: ['abandonTicket', [body.ticketId, body.expectedRevision, ...(body.reason === undefined ? [] : [body.reason])]],
         unabandon: ['unabandonTicket', [body.ticketId, body.expectedRevision]],
         'root-agent': ['replaceRootAgent', [body.agentId, body.profile]],
-        'root-flow': ['replaceRootOrchestration', [body.orchestrationId, body.definition]]
+        'root-flow': ['replaceRootOrchestration', [body.orchestrationId, body.definition]],
+        'template-save': ['saveTemplate', [{ kind: body.kind, id: body.id, ...(body.name !== undefined ? { name: body.name } : {}), content: body.content, ...(body.source !== undefined ? { source: body.source } : {}), ...(body.update !== undefined ? { update: body.update } : {}) }]],
+        'template-save-from-ticket': ['saveTemplateFromTicket', [{ ticketId: body.ticketId, id: body.id, ...(body.name !== undefined ? { name: body.name } : {}), agentMapping: body.agentMapping, ...(body.source !== undefined ? { source: body.source } : {}), ...(body.update !== undefined ? { update: body.update } : {}) }]]
       };
       const [method, args] = actions[body.action];
       result = await service.human(target.id, 'dsh-dashboard', method, args);
@@ -388,7 +435,9 @@ export function registerFleetDashboardApi(ctx, { getService }) {
       projects.push(project);
     }
     const health = service.health;
-    return reply({ schemaVersion: 1, pluginVersion, scheduleStatus: service.scheduleStatus?.() ?? { available: false, unavailableReason: 'Host schedule service is unavailable; scheduling cannot be enabled.' }, projects, health: { ready: health.ready, error: health.error } });
+    let admin = null;
+    try { admin = (await service.catalog()).settings?.admin ?? null; } catch { admin = null; }
+    return reply({ schemaVersion: 1, pluginVersion, scheduleStatus: service.scheduleStatus?.() ?? { available: false, unavailableReason: 'Host schedule service is unavailable; scheduling cannot be enabled.' }, projects, admin, health: { ready: health.ready, error: health.error } });
   };
   const handle = (method, operation) => request => {
     if (disposed) return Promise.resolve(errorResponse(new RequestFailure(503, 'unavailable', 'Fleet Dashboard is closing.')));
