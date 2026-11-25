@@ -33,6 +33,8 @@ function harness(options = {}) {
     submitEvidence: invoke('submitEvidence', { artifacts: [], completion: { evidenceKind: 'agent-report' } }),
     agentStart: invoke('agentStart', (_ws, _sid, id) => projectTicket({ id, workspaceId: actualContext.workspaceId, originSessionId: actualContext.sessionId, status: 'draft', revision: 2, plan: normalizePlan({ goal: 'Test Ticket' }), execution: null, activity: [] })),
     agentStop: invoke('agentStop', (_ws, _sid, id) => projectTicket({ id, workspaceId: actualContext.workspaceId, originSessionId: actualContext.sessionId, status: 'stop-requested', revision: 3, plan: normalizePlan({ goal: 'Test Ticket' }), execution: null, activity: [] })),
+    agentRetryNode: invoke('agentRetryNode', (_ws, _sid, id) => projectTicket({ id, workspaceId: actualContext.workspaceId, originSessionId: actualContext.sessionId, status: 'running', revision: 4, plan: normalizePlan({ goal: 'Test Ticket' }), execution: null, activity: [] })),
+    adminRetryNode: invoke('adminRetryNode', (_ws, _sid, target, id) => projectTicket({ id, workspaceId: target, originSessionId: 'x', status: 'running', revision: 5, plan: normalizePlan({ goal: 'Test Ticket' }), execution: null, activity: [] })),
     agentSchedule: invoke('agentSchedule', scheduleResult),
     health: { ready: true, error: null },
   };
@@ -82,14 +84,14 @@ for (const [command, method, args] of controls) test(`native /fleet ${method} is
   assert.deepEqual(JSON.parse(result.text), { action: method, args });
 });
 
-test('Agent registry exposes the eight Fleet tools with canonical text schema/render', async () => {
+test('Agent registry exposes the ten Fleet tools with canonical text schema/render', async () => {
   const h = harness({ presets: { list: async () => [{ id: 'preset' }] } });
-  assert.deepEqual(new Set(h.tools.keys()), new Set(['fleet_catalog', 'fleet_status', 'fleet_thread', 'fleet_submit', 'fleet_start', 'fleet_stop', 'fleet_admin', 'fleet_draft', 'fleet_schedule']));
+  assert.deepEqual(new Set(h.tools.keys()), new Set(['fleet_catalog', 'fleet_status', 'fleet_thread', 'fleet_submit', 'fleet_start', 'fleet_stop', 'fleet_retry', 'fleet_admin', 'fleet_draft', 'fleet_schedule']));
   assert.equal(h.tools.has('fleet_prepare'), false, 'the prepare bypass is removed');
   assert.deepEqual([...h.commands.keys()], ['fleet']);
-  for (const forbidden of ['fleet_resume', 'fleet_retry', 'fleet_pass', 'fleet_review', 'fleet_change', 'fleet_root_agent', 'fleet_root_flow']) assert.equal(h.tools.has(forbidden), false);
+  for (const forbidden of ['fleet_resume', 'fleet_pass', 'fleet_review', 'fleet_change', 'fleet_root_agent', 'fleet_root_flow']) assert.equal(h.tools.has(forbidden), false);
   assert.equal(h.definitions.length, h.tools.size, 'all tools pass through defineTool');
-  for (const [name, args] of [['fleet_catalog', {}], ['fleet_status', {}], ['fleet_thread', { ticketId: 'ticket', nodeId: 'build' }], ['fleet_submit', {}], ['fleet_start', { ticketId: 'ticket' }], ['fleet_stop', { ticketId: 'ticket' }], ['fleet_draft', { action: 'read' }], ['fleet_schedule', scheduleArgs]]) {
+  for (const [name, args] of [['fleet_catalog', {}], ['fleet_status', {}], ['fleet_thread', { ticketId: 'ticket', nodeId: 'build' }], ['fleet_submit', {}], ['fleet_start', { ticketId: 'ticket' }], ['fleet_stop', { ticketId: 'ticket' }], ['fleet_retry', { ticketId: 'ticket', nodeId: 'build', reason: 'User asked to redo it' }], ['fleet_draft', { action: 'read' }], ['fleet_schedule', scheduleArgs]]) {
     const definition = h.tools.get(name), result = await h.tool(name, args);
     parsed(result);
     assert.deepEqual(definition.output.schema, { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } }, `${name} canonical schema`);
@@ -257,7 +259,7 @@ test('/fleet new creates the draft Ticket on the spot and steers the native Agen
   assert.deepEqual(messages[0].source,{kind:'user'}); assert.deepEqual(messages[0].content[0],attachment);
   const prompt=messages[0].content.at(-1).text;
   assert.match(prompt,/build a bilingual blog/); assert.match(prompt,/Draft Ticket draft\./,'the request pre-created its draft Ticket');
-  assert.match(prompt,/SAME Ticket is editable in draft or stopped/); assert.match(prompt,/start decision belongs to the human/); assert.match(prompt,/explicitly asks in this conversation to start or resume/); assert.match(prompt,/call fleet_stop/); assert.match(prompt,/Never claim execution started or stopped without actual evidence/);
+  assert.match(prompt,/SAME Ticket is editable in draft or stopped/); assert.match(prompt,/start decision belongs to the human/); assert.match(prompt,/explicitly asks in this conversation to start or resume/); assert.match(prompt,/call fleet_stop/); assert.match(prompt,/call fleet_retry/); assert.match(prompt,/ask the user first and proceed only on their direct consent/); assert.match(prompt,/Never claim execution started, stopped or retried without actual evidence/);
   assert.equal(callsOf(h,'saveDraftTicket').length,1);
   assert.deepEqual(callsOf(h,'saveDraftTicket')[0].args,[actualContext.workspaceId,{sessionId:actualContext.sessionId,plan:normalizePlan({goal:'build a bilingual blog'}),actor:{kind:'human',userId:`dsh-command:${actualContext.sessionId}`}}]);
   const bare=await h.command(' new',{agent:{steer:async message=>messages.push(message)}});
@@ -269,6 +271,14 @@ test('/fleet new creates the draft Ticket on the spot and steers the native Agen
   assert.match((await h.command('newx ticket')).text,/Unknown Fleet command/);
   const execution=harness({owned:true});
   assert.equal((await execution.command(' new test',{agent:{steer:()=>assert.fail('execution Sessions must not steer the planner')}})).kind,'error');
+});
+
+test('native /fleet admin retry routes to adminRetryNode with the actual Session identity', async () => {
+  const h = harness();
+  const result = await h.command('admin retry other-workspace ticket build User asked to redo the verification');
+  assert.equal(result.kind, 'success');
+  assert.deepEqual(callsOf(h, 'adminRetryNode'), [{ method: 'adminRetryNode', args: [actualContext.workspaceId, actualContext.sessionId, 'other-workspace', 'ticket', 'build', 'User asked to redo the verification'] }]);
+  assert.equal(callsOf(h, 'human').length, 0, 'Admin retry never routes through the human capability');
 });
 
 test('planning command cancellation during context resolution never steers an Agent', async () => {

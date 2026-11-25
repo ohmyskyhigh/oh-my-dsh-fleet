@@ -937,21 +937,22 @@ export class FleetCore {
   #replaceRootOrchestration(ws, actor, id, definition) {
     return this.#replaceTemplate(this.#template(id, 'orchestration').id, this.#templateContent('orchestration', definition), actor);
   }
-  /** P-77: the Admin-granted Agent writes templates or another Workspace's plan with an audited actor. */
+  /** P-77/P-78: the Admin-granted Agent writes templates, another Workspace's plan or retries a node with an audited actor. */
   adminAgent(ws, sessionId, scope) {
     const actor = { kind: 'agent', userId: text(sessionId, 'session ID'), via: 'user-request', adminScope: scope ?? 'all' };
     return Object.freeze({
       saveTemplate: input => this.#saveTemplate(ws, actor, input),
       replaceRootAgent: (id, profile) => this.#replaceRootAgent(ws, actor, id, profile),
       replaceRootOrchestration: (id, definition) => this.#replaceRootOrchestration(ws, actor, id, definition),
-      savePlan: (ticketId, input) => this.saveDraftTicket(ws, { ...input, ticketId, actor })
+      savePlan: (ticketId, input) => this.saveDraftTicket(ws, { ...input, ticketId, actor }),
+      retryNode: (id, nodeId, reason) => { const t = this.#ticket(ws, id); this.#node(t, nodeId); return this.#retry(t, [nodeId], reason, actor); }
     });
   }
-  /** P-51/P-76: the Agent executes a start/resume/stop decision the user explicitly made in the
+  /** P-51/P-76/P-78: the Agent executes a start/resume/stop/retry decision the user explicitly made in the
    * conversation. Auditable as an Agent acting via a user request, never on its own. */
   agent(ws, sessionId) {
     const actor = { kind: 'agent', userId: text(sessionId, 'session ID'), via: 'user-request' };
-    return Object.freeze({ start: id => this.#start(ws, id, actor), resume: id => this.#start(ws, id, actor, true), stop: id => this.#stopTicket(this.#ticket(ws, id), actor) });
+    return Object.freeze({ start: id => this.#start(ws, id, actor), resume: id => this.#start(ws, id, actor, true), stop: id => this.#stopTicket(this.#ticket(ws, id), actor), retryNode: (id, nodeId, reason) => { const t = this.#ticket(ws, id); this.#node(t, nodeId); return this.#retry(t, [nodeId], reason, actor); } });
   }
   human(ws, userId) {
     const actor = { kind: 'human', userId: text(userId, 'user ID') };

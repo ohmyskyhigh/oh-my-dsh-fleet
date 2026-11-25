@@ -597,7 +597,7 @@ test('Runtime injects connection, shares one service with native Chat, and close
   assert.equal(listed.kind, 'success');
   const fetched = await h.routes.get('/api/fleet/view').fetch(new Request('http://fleet.fixture/api/fleet/view?workspaceId=alpha&ticketId=ticket'));
   assert.equal((await fetched.json()).selectedTicket.goal, 'Deliver alpha'); assert.equal(opens.length, 1);
-  assert.equal(h.tools.size, 9); assert.ok(h.tools.has('fleet_schedule')); assert.ok(h.tools.has('fleet_stop')); assert.ok(h.tools.has('fleet_admin'));
+  assert.equal(h.tools.size, 10); assert.ok(h.tools.has('fleet_schedule')); assert.ok(h.tools.has('fleet_stop')); assert.ok(h.tools.has('fleet_retry')); assert.ok(h.tools.has('fleet_admin'));
   assert.equal(h.commands.size, 1, 'only the canonical /fleet command remains after alias retirement');
   await h.dispose();
   assert.equal(h.routes.size, 0); assert.equal(h.tools.size, 0); assert.equal(h.commands.size, 0);

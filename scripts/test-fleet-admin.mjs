@@ -71,6 +71,23 @@ test('P-77: Admin agents save templates and another Workspace plan, then start a
   assert.ok(['stop-requested', 'stopped'].includes(stopped.status));
 });
 
+test('P-78: Admin agents retry a node in another Workspace with adminScope audit; ungranted and out-of-scope are refused', async t => {
+  const f = await fixture(t);
+  await f.service.saveDraftTicket('b', { id: 't', sessionId: 'origin-b', plan: plan() });
+  await assert.rejects(f.service.adminRetryNode('a', 'admin-session', 'b', 't', 'n', 'why'), e => e.code === 'admin-required');
+  await f.service.adminGrant('a', 'person', ['a']);
+  await assert.rejects(f.service.adminRetryNode('a', 'admin-session', 'b', 't', 'n', 'why'), e => e.code === 'admin-required', 'beta is outside the narrowed scope');
+  await f.service.adminGrant('a', 'person', 'all');
+  await f.service.adminStart('a', 'admin-session', 'b', 't');
+  await f.service.adminStop('a', 'admin-session', 'b', 't');
+  const ticket = await f.service.adminRetryNode('a', 'admin-session', 'b', 't', 'n', 'admin requested retry');
+  assert.equal(ticket.status, 'running');
+  const event = ticket.activity.filter(x => x.type === 'node-retry-requested').at(-1);
+  assert.deepEqual(event.actor, { kind: 'agent', userId: 'admin-session', via: 'user-request', adminScope: 'all' });
+  const row = ticket.execution.nodes.n.thread.filter(r => r.intent === 'retry').at(-1);
+  assert.equal(row.text, 'admin requested retry');
+});
+
 test('P-77: fleet_admin tool is registered, delegates, and refuses execution Sessions', async t => {
   const calls = [], tools = new Map();
   const service = {
@@ -83,6 +100,7 @@ test('P-77: fleet_admin tool is registered, delegates, and refuses execution Ses
     adminSavePlan: async (ws, sid, target, input) => { calls.push(['plan-save', ws, sid, target, input]); return projectTicket({ id: input.ticketId, workspaceId: target, originSessionId: 'x', status: 'draft', revision: 2, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }); },
     adminStart: async (ws, sid, target, id) => { calls.push(['start', ws, sid, target, id]); return { id, status: 'running', workspaceId: target, originSessionId: 'x', revision: 3, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }; },
     adminStop: async (ws, sid, target, id) => { calls.push(['stop', ws, sid, target, id]); return { id, status: 'stopped', workspaceId: target, originSessionId: 'x', revision: 4, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }; },
+    adminRetryNode: async (ws, sid, target, id, nodeId, reason) => { calls.push(['retry', ws, sid, target, id, nodeId, reason]); return { id, status: 'running', workspaceId: target, originSessionId: 'x', revision: 5, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }; },
     catalog: async () => ({ agents: [], orchestrations: [], workspaces: [] })
   };
   const ctx = { tools: { register: d => { tools.set(d.name, d); return () => tools.delete(d.name); } }, commands: { register: () => () => {} } };
@@ -90,11 +108,14 @@ test('P-77: fleet_admin tool is registered, delegates, and refuses execution Ses
   const def = tools.get('fleet_admin');
   assert.ok(def);
   assert.equal(def.parameters.action.required, true);
+  assert.ok(def.parameters.action.enum.includes('retry'), 'P-78 adds the cross-Workspace retry action');
   assert.match(def.description, /granted Admin/);
   await def.execute({ action: 'status' }, { agent: { id: 'x' } });
   await def.execute({ action: 'tickets' }, { agent: { id: 'x' } });
   await def.execute({ action: 'start', workspaceId: 'b', ticketId: 't' }, { agent: { id: 'x' } });
-  assert.deepEqual(calls.map(c => c[0]), ['status', 'tickets', 'start']);
+  await def.execute({ action: 'retry', workspaceId: 'b', ticketId: 't', nodeId: 'n', reason: 'user asked' }, { agent: { id: 'x' } });
+  assert.deepEqual(calls.map(c => c[0]), ['status', 'tickets', 'start', 'retry']);
+  assert.deepEqual(calls.at(-1), ['retry', 'a', 's-1', 'b', 't', 'n', 'user asked']);
   // execution Sessions cannot use the Admin surface
   service.ownsSession = async () => true;
   await assert.rejects(def.execute({ action: 'status' }, { agent: { id: 'x' } }), /Execution Sessions/);

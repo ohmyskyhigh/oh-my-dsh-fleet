@@ -18,7 +18,7 @@ export const fleetHelp = `Fleet — long-running tasks in the current Workspace
 
 Use /fleet new YOUR_REQUEST to create a draft Ticket on the spot and configure it with an Agent, editable in the sidebar, Chat or Dashboard until you start it. There is no separate confirmation step: your edits are your confirmation, and /fleet start freezes the snapshot and executes.
 
-Agents can draft and inspect, and may execute your explicitly requested start/resume through the fleet_start tool, or stop a running Ticket through fleet_stop; only your decision starts or stops execution or overrides a Gate. Saying "start it" or "stop it" in chat is enough — the Agent will call the matching tool for you. Starting finalizes the draft snapshot. Ask in chat to schedule this Ticket once, daily or weekly and the Agent can call fleet_schedule for you.
+Agents can draft and inspect, and may execute your explicitly requested start/resume through the fleet_start tool, stop a running Ticket through fleet_stop, or retry one of its nodes through fleet_retry; only your decision starts, stops or retries execution or overrides a Gate. Saying "start it", "stop it" or "retry that node" in chat is enough — the Agent will call the matching tool for you (when the target Ticket or node is unclear it asks you first and acts on your direct consent). Starting finalizes the draft snapshot. Ask in chat to schedule this Ticket once, daily or weekly and the Agent can call fleet_schedule for you.
 
 Execution Agents report completion with the fleet_submit tool (artifacts, acceptanceResults, verification with source "agent-report", summary); each submission seals a new artifact version. /fleet review evidence may be plain text or a JSON object with findings and artifactRefs. /fleet deliverables shows each deliverable's latest version and review status; /fleet deliver-override explicitly releases delivery when bindings or coverage are missing and records the reason.
 
@@ -64,7 +64,7 @@ Every node also declares its stage plan in task.stagePlan: goal (why this stage 
 Optional modelSelection {provider,model,reasoningEffort?} on agents[id].profile and on nodes (node overrides agent; omitted inherits the host default). Choose only models and efforts listed in fleet_catalog modelCatalog. Flat profile.model/provider/temperature/maxTokens/reasoningEffort remain unsupported.
 Copy chosen Template content by value; node.agentId is direct, role is only a label. Do not create binding, orchestration or nested ticket fields. Read Root settings rules and generation.rules from fleet_catalog and apply them while preparing the plan.
 When the user explicitly requests a scheduled Fleet run, read the saved Ticket revision and use fleet_schedule directly. Each due occurrence creates a separate Ticket from this plan. Report the returned next time and series ID.
-The start decision belongs to the human. When the user explicitly asks in this conversation to start or resume this Ticket, call fleet_start with its ticketId to execute that decision; when the user explicitly asks to stop this Ticket, call fleet_stop. Never call either to advance your own plan, to guess intent, or for another conversation's Ticket. Without an explicit request, do not start or stop. When this Workspace is granted Admin, the user may also ask you to view or manage another Workspace: use fleet_admin (tickets/ticket/templates to read; template-save/plan-save/start/stop only on an explicit request). Running/stop-requested configuration is locked. Older or unknown plans must be explicitly repaired or regenerated, preserving their originals; do not silently replace them in the ordinary editor. Never claim execution started or stopped without actual evidence. Summarize the plan in the user's language and invite edits.`;
+The start decision belongs to the human. When the user explicitly asks in this conversation to start or resume this Ticket, call fleet_start with its ticketId to execute that decision; when the user explicitly asks to stop this Ticket, call fleet_stop; when the user explicitly asks to retry a node of a Ticket in this Workspace, call fleet_retry with ticketId, nodeId and reason. If the target Ticket, node or reason is unclear (several candidate Tickets or failed/interrupted nodes), ask the user first and proceed only on their direct consent. Never call these to advance your own plan, to guess intent, or for another conversation's Ticket. Without an explicit request, do not start, stop or retry. When this Workspace is granted Admin, the user may also ask you to view or manage another Workspace: use fleet_admin (tickets/ticket/templates to read; template-save/plan-save/start/stop/retry only on an explicit request). Running/stop-requested configuration is locked. Older or unknown plans must be explicitly repaired or regenerated, preserving their originals; do not silently replace them in the ordinary editor. Never claim execution started, stopped or retried without actual evidence. Summarize the plan in the user's language and invite edits.`;
 
 export function registerFleetChat(ctx, { getService, resolveAgentContext, defineTool, createUserMessage }) {
   const disposers = [];
@@ -112,10 +112,20 @@ export function registerFleetChat(ctx, { getService, resolveAgentContext, define
     await planningContext(c);
     return projectTicket(await c.service.agentStop(c.workspaceId, c.sessionId, args.ticketId));
   });
-  tool('fleet_admin', 'Cross-Workspace Admin surface (P-77). Available only when this Workspace is granted Admin; targets must be inside its scope. Read actions (status/tickets/ticket/templates) may run on request; write actions (template-save/plan-save/start/stop) ONLY when the user explicitly asked for them in this conversation — never to advance your own plan or guess intent. Audit records the Agent acting via a user request with adminScope. No Gate or Root modification outside the listed actions.', {
-    action: { type: 'string', enum: ['status', 'tickets', 'ticket', 'templates', 'template-save', 'plan-save', 'start', 'stop'], required: true },
-    workspaceId: { type: 'string', description: 'Target Workspace for ticket/plan/start/stop actions.' },
-    ticketId: { type: 'string', description: 'Target Ticket ID for ticket/plan-save/start/stop.' },
+  tool('fleet_retry', 'Retry one node of a Ticket in this Workspace on the user\'s explicit request (P-78): the same path as the UI retry button and /fleet retry — model-catalog validation and the shared retry closure (archive affected Gates, reset the downstream closure, open a new Attempt with a fresh execution Session, exactly like the human retry path); manual retry never consumes the rework budget. Scope: any Ticket in this Workspace (originSessionId match not required). ONLY call when the user clearly asked to retry this node; when the target Ticket, node or reason is unclear, ask the user first and proceed only on their direct consent — never to advance your own plan, never to guess intent. Execution/review Sessions are rejected. The activity and node thread record the Agent acting via a user request. No Gate or Root capability.', {
+    ticketId: { type: 'string', required: true, description: 'ID of the running, stopped or delivered Ticket in this Workspace.' },
+    nodeId: { type: 'string', required: true, description: 'ID of the failed, cancelled, interrupted or completed node to retry.' },
+    reason: { type: 'string', required: true, description: 'Why this node is retried; recorded in the node thread and activity.' }
+  }, async (args, c) => {
+    await planningContext(c);
+    return projectTicket(await c.service.agentRetryNode(c.workspaceId, c.sessionId, args.ticketId, args.nodeId, args.reason));
+  });
+  tool('fleet_admin', 'Cross-Workspace Admin surface (P-77/P-78). Available only when this Workspace is granted Admin; targets must be inside its scope. Read actions (status/tickets/ticket/templates) may run on request; write actions (template-save/plan-save/start/stop/retry) ONLY when the user explicitly asked for them in this conversation — never to advance your own plan or guess intent; for retry, ask the user first when the target Ticket or node is unclear and proceed only on their direct consent. Audit records the Agent acting via a user request with adminScope. No Gate or Root modification outside the listed actions.', {
+    action: { type: 'string', enum: ['status', 'tickets', 'ticket', 'templates', 'template-save', 'plan-save', 'start', 'stop', 'retry'], required: true },
+    workspaceId: { type: 'string', description: 'Target Workspace for ticket/plan/start/stop/retry actions.' },
+    ticketId: { type: 'string', description: 'Target Ticket ID for ticket/plan-save/start/stop/retry.' },
+    nodeId: { type: 'string', description: 'Target node ID for retry.' },
+    reason: { type: 'string', description: 'Retry reason for retry; recorded in the target node thread and activity.' },
     expectedRevision: { type: 'number', description: 'Ticket revision from a prior read, required for plan-save.' },
     plan: { type: 'string', description: 'Complete plan JSON for plan-save.' },
     template: { type: 'string', description: 'Template JSON {kind,id,name?,content,update?} for template-save.' },
@@ -131,6 +141,7 @@ export function registerFleetChat(ctx, { getService, resolveAgentContext, define
     if (args.action === 'plan-save') return c.service.adminSavePlan(ws, c.sessionId, args.workspaceId, { ticketId: args.ticketId, expectedRevision: args.expectedRevision, plan: normalizePlan(parse(args.plan)) });
     if (args.action === 'start') return projectTicket(await c.service.adminStart(ws, c.sessionId, args.workspaceId, args.ticketId));
     if (args.action === 'stop') return projectTicket(await c.service.adminStop(ws, c.sessionId, args.workspaceId, args.ticketId));
+    if (args.action === 'retry') return projectTicket(await c.service.adminRetryNode(ws, c.sessionId, args.workspaceId, args.ticketId, args.nodeId, args.reason));
     throw new Error('Unknown fleet_admin action.');
   });
   tool('fleet_schedule', 'Schedule this conversation’s Fleet Ticket when the user explicitly asks for a one-off, daily or weekly run. Use this native tool directly in chat instead of sending the user to the Dashboard or creating a generic reminder. Each occurrence creates and starts its own Ticket from the saved plan. Returns the Fleet series ID, host schedule ID and next execution time.', {
@@ -217,9 +228,10 @@ export function registerFleetChat(ctx, { getService, resolveAgentContext, define
           else if (sub === 'revoke') result = await c.service.adminRevoke(c.workspaceId, `dsh-command:${c.sessionId}`);
           else if (sub === 'show') { const [ws, ticketId] = words(tail, 2); result = await c.service.adminTicket(c.workspaceId, ws, ticketId); }
           else if (sub === 'start' || sub === 'stop') { const [ws, ticketId] = words(tail, 2); result = projectTicket(await (sub === 'start' ? c.service.adminStart : c.service.adminStop)(c.workspaceId, c.sessionId, ws, ticketId)); }
+          else if (sub === 'retry') { const [ws, ticketId, nodeId, reason] = words(tail, 3); result = projectTicket(await c.service.adminRetryNode(c.workspaceId, c.sessionId, ws, ticketId, nodeId, reason)); }
           else if (sub === 'template-save') result = await c.service.adminSaveTemplate(c.workspaceId, c.sessionId, parse(tail));
           else if (sub === 'plan-save') { const [ws, ticketId, revisionText, planText] = words(tail, 2); const expectedRevision = Number(revisionText); if (!/^\d+$/.test(revisionText)) throw new Error('Expected a positive Ticket revision from /fleet admin show.'); result = await c.service.adminSavePlan(c.workspaceId, c.sessionId, ws, { ticketId, expectedRevision, plan: normalizePlan(parse(planText)) }); }
-          else throw new Error('Unknown admin command. Use /fleet admin status|tickets|show|templates|grant|revoke|start|stop.');
+          else throw new Error('Unknown admin command. Use /fleet admin status|tickets|show|templates|grant|revoke|start|stop|retry.');
         }
         else if (action === 'health') result = c.service.health;
         else if (action === 'catalog') result = { ...await c.service.catalog(), availablePresets: await ctx.agentPresets?.list?.(), modelCatalog: await modelCatalogProjection(c.service) };

@@ -83,6 +83,7 @@ function chatHarness({ owned = false } = {}) {
     ownsSession: async () => owned,
     agentStart: async (workspaceId, sessionId, ticketId) => { calls.push(['agentStart', workspaceId, sessionId, ticketId]); return projectTicket({ id: ticketId, workspaceId, originSessionId: sessionId, status: 'running', revision: 3, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }); },
     agentStop: async (workspaceId, sessionId, ticketId) => { calls.push(['agentStop', workspaceId, sessionId, ticketId]); return projectTicket({ id: ticketId, workspaceId, originSessionId: sessionId, status: 'running', revision: 3, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }); },
+    agentRetryNode: async (workspaceId, sessionId, ticketId, nodeId, reason) => { calls.push(['agentRetryNode', workspaceId, sessionId, ticketId, nodeId, reason]); return projectTicket({ id: ticketId, workspaceId, originSessionId: sessionId, status: 'running', revision: 4, plan: normalizePlan({ goal: 'g' }), execution: null, activity: [] }); },
     catalog: async () => ({ agents: [], orchestrations: [], workspaces: [] })
   };
   const ctx = { tools: { register: d => { tools.set(d.name, d); return () => tools.delete(d.name); } }, commands: { register: () => () => {} } };
@@ -135,6 +136,74 @@ test('fleet_stop tool is registered, delegates to agentStop and refuses executio
   assert.equal(JSON.parse(result.text).status, 'running');
   const owned = chatHarness({ owned: true });
   await assert.rejects(owned.tools.get('fleet_stop').execute({ ticketId: 't' }, { agent: { id: 'exec' } }), /Execution Sessions/);
+  assert.deepEqual(owned.calls, []);
+});
+
+// ---- P-78: Agent node retry (any Ticket in this Workspace, explicit user request) ----
+test('agentRetryNode retries a node of any Workspace Ticket via user-request through the same closure as human retry', async t => {
+  const f = await fixture(t);
+  await f.service.saveDraftTicket('a', { id: 't', sessionId: 'origin', plan: plan() });
+  await f.service.human('a', 'u', 'start', ['t']);
+  await f.service.tick();
+  const first = (await f.service.read('a', 't')).execution.nodes.a.attempts.at(-1);
+  f.h.sessions.set(first.sessionId, { status: 'completed', output: 'v1' });
+  await f.service.tick();
+  assert.equal((await f.service.read('a', 't')).status, 'delivered');
+  // a different conversation in the same Workspace executes the user's retry decision (no originSessionId requirement)
+  const ticket = await f.service.agentRetryNode('a', 'another-session', 't', 'a', 'user asked to redo the verification');
+  assert.equal(ticket.status, 'running');
+  const event = ticket.activity.filter(x => x.type === 'node-retry-requested').at(-1);
+  assert.deepEqual(event.actor, { kind: 'agent', userId: 'another-session', via: 'user-request' });
+  const row = ticket.execution.nodes.a.thread.filter(r => r.intent === 'retry').at(-1);
+  assert.equal(row.text, 'user asked to redo the verification');
+  assert.deepEqual(row.actor, { kind: 'agent', userId: 'another-session', via: 'user-request' });
+  const createsBefore = f.h.calls.create.length;
+  await f.service.tick();
+  const after = await f.service.read('a', 't');
+  assert.equal(after.execution.nodes.a.attempts.length, 2, 'retry opens a new Attempt cycle');
+  // parity with the human retry path: a manual retry dispatches a fresh Session (P-75 reuse is Gate-rework only)
+  assert.equal(f.h.calls.create.length, createsBefore + 1, 'retry dispatches a new Session in the same tick');
+  assert.notEqual(after.execution.nodes.a.attempts.at(-1).sessionId, first.sessionId);
+});
+test('agentRetryNode refuses invalid states, unknown nodes/Tickets and empty reasons', async t => {
+  const f = await fixture(t);
+  await f.service.saveDraftTicket('a', { id: 't', sessionId: 'origin', plan: plan() });
+  // parity with human retryNode: the node pre-check runs before the Ticket-state guard, and a draft has no execution nodes
+  await assert.rejects(f.service.agentRetryNode('a', 'origin', 't', 'a', 'why'), e => e.code === 'unknown-node', 'draft Ticket has no retryable execution node');
+  await assert.rejects(f.service.agentRetryNode('a', 'origin', 'missing', 'a', 'why'), e => e.code === 'unknown-ticket');
+  await f.service.human('a', 'u', 'start', ['t']);
+  await f.service.tick();
+  await assert.rejects(f.service.agentRetryNode('a', 'origin', 't', 'a', 'why'), e => e.code === 'state-conflict', 'a running node is not retryable');
+  await assert.rejects(f.service.agentRetryNode('a', 'origin', 't', 'nope', 'why'), e => e.code === 'unknown-node');
+  await f.service.human('a', 'u', 'stop', ['t']);
+  await f.service.tick();
+  await assert.rejects(f.service.agentRetryNode('a', 'origin', 't', 'a', '   '), e => e.code === 'invalid-input', 'a retry requires a nonempty reason');
+});
+test('agentRetryNode validates modelSelection against the host catalog like the human retry path', async t => {
+  const f = await fixture(t);
+  await f.service.saveDraftTicket('a', { id: 't', sessionId: 'origin', plan: plan() });
+  await f.service.human('a', 'u', 'start', ['t']);
+  await f.service.human('a', 'u', 'stop', ['t']);
+  await f.service.tick();
+  const current = await f.service.read('a', 't');
+  const bad = plan(); bad.nodes[0].modelSelection = { provider: 'p', model: 'missing' };
+  await f.service.saveDraftTicket('a', { ticketId: 't', expectedRevision: current.revision, plan: bad });
+  await assert.rejects(f.service.agentRetryNode('a', 'origin', 't', 'a', 'why'), e => e.code === 'unsupported-profile' && /model catalog/.test(e.message));
+});
+test('fleet_retry tool is registered, delegates to agentRetryNode and refuses execution Sessions', async () => {
+  const h = chatHarness();
+  const definition = h.tools.get('fleet_retry');
+  assert.ok(definition);
+  assert.equal(definition.parameters.ticketId.required, true);
+  assert.equal(definition.parameters.nodeId.required, true);
+  assert.equal(definition.parameters.reason.required, true);
+  assert.match(definition.description, /ONLY call when the user clearly asked to retry/);
+  assert.match(definition.description, /ask the user first and proceed only on their direct consent/);
+  const result = await definition.execute({ ticketId: 't', nodeId: 'a', reason: 'redo' }, { agent: { id: 'any' } });
+  assert.deepEqual(h.calls, [['agentRetryNode', 'w', 's-1', 't', 'a', 'redo']]);
+  assert.equal(JSON.parse(result.text).status, 'running');
+  const owned = chatHarness({ owned: true });
+  await assert.rejects(owned.tools.get('fleet_retry').execute({ ticketId: 't', nodeId: 'a', reason: 'redo' }, { agent: { id: 'exec' } }), /Execution Sessions/);
   assert.deepEqual(owned.calls, []);
 });
 

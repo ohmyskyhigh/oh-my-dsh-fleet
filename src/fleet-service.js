@@ -581,6 +581,16 @@ export class FleetService {
       return this.#commit(targetWs, core => core.agent(targetWs, sessionId).stop(ticketId));
     });
   }
+  /** P-78: Admin-granted cross-Workspace node retry, audited with the caller's adminScope. */
+  adminRetryNode(callerWs, sessionId, targetWs, ticketId, nodeId, reason) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      this.#requireAdmin(callerWs, targetWs);
+      await this.#checkStartSelections(targetWs, ticketId);
+      const entry = this.#core.adminConfig().workspaces.find(e => e.workspaceId === callerWs);
+      return this.#commit(targetWs, core => core.adminAgent(targetWs, sessionId, entry.scope).retryNode(ticketId, nodeId, reason));
+    });
+  }
   adminGrant(workspaceId, userId, scope) {
     return this.#enqueue(async () => {
       await this.#refresh();
@@ -599,6 +609,17 @@ export class FleetService {
       const ticket = this.#core.readTicket(workspaceId, ticketId);
       guard(ticket, 'unknown-ticket', 'No Ticket with this ID belongs to this Workspace.');
       return this.#commit(workspaceId, core => core.agent(workspaceId, sessionId).stop(ticketId));
+    });
+  }
+  /** P-78: the Agent retries one node of any Ticket in this Workspace on the user's explicit request,
+   * through the same validation and retry closure as the human retryNode action. */
+  agentRetryNode(workspaceId, sessionId, ticketId, nodeId, reason) {
+    return this.#enqueue(async () => {
+      await this.#refresh();
+      const ticket = this.#core.readTicket(workspaceId, ticketId);
+      guard(ticket, 'unknown-ticket', 'No Ticket with this ID belongs to this Workspace.');
+      await this.#checkStartSelections(workspaceId, ticketId);
+      return this.#commit(workspaceId, core => core.agent(workspaceId, sessionId).retryNode(ticketId, nodeId, reason));
     });
   }
   async #checkStartSelections(workspaceId, input, retryRead = false) {
